@@ -53,15 +53,21 @@ def get_main_menu_inline_keyboard(
     else:
         builder.row(language_button)
 
-    if settings.SUPPORT_LINK:
+    if settings.SUPPORT_LINK and settings.CHANNEL_LINK:
         builder.row(
             InlineKeyboardButton(text=_(key="menu_support_button"),
-                                 url=settings.SUPPORT_LINK))
+                                 url=settings.SUPPORT_LINK),
+            InlineKeyboardButton(text=_(key="menu_channel_button"),
+                                 url=settings.CHANNEL_LINK),
+        )
 
-    if settings.TERMS_OF_SERVICE_URL:
+    if settings.TERMS_OF_SERVICE_URL and settings.PRIVACY_POLICY_URL:
         builder.row(
             InlineKeyboardButton(text=_(key="menu_terms_button"),
-                                 url=settings.TERMS_OF_SERVICE_URL))
+                                 url=settings.TERMS_OF_SERVICE_URL),
+            InlineKeyboardButton(text=_(key="menu_privacy_policy_button"), 
+                                 url=settings.PRIVACY_POLICY_URL),
+        )
 
     return builder.as_markup()
 

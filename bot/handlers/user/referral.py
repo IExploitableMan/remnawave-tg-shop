@@ -101,8 +101,13 @@ async def referral_command_handler(event: Union[types.Message,
                           referee_bonus_days=ref_bonus
                           if ref_bonus is not None else _("no_bonus_placeholder")))
 
-        bonus_details_str = "\n".join(bonus_info_parts) if bonus_info_parts else _(
-            "referral_no_bonuses_configured")
+        trial_inviter_bonus = settings.REFERRAL_BONUS_DAYS_INVITER_TRIAL
+        if trial_inviter_bonus is not None and trial_inviter_bonus > 0:
+            bonus_info_parts.append(
+                _("referral_bonus_for_trial",
+                  inviter_bonus_days=trial_inviter_bonus))
+
+        bonus_details_str = "\n".join(bonus_info_parts) if bonus_info_parts else ""
 
     # Get referral statistics
     referral_stats = await referral_service.get_referral_stats(session, inviter_user_id)

@@ -181,6 +181,8 @@ class Settings(BaseSettings):
         default=15, alias="REFERRAL_BONUS_DAYS_6_MONTHS")
     REFERRAL_BONUS_DAYS_INVITER_12_MONTHS: Optional[int] = Field(
         default=30, alias="REFERRAL_BONUS_DAYS_12_MONTHS")
+    REFERRAL_BONUS_DAYS_INVITER_TRIAL: Optional[int] = Field(
+        default=1, alias="REFERRAL_BONUS_DAYS_TRIAL")
 
     REFERRAL_BONUS_DAYS_REFEREE_1_MONTH: Optional[int] = Field(
         default=1, alias="REFEREE_BONUS_DAYS_1_MONTH")

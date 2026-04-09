@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 
 from config.settings import Settings
+from bot.services.referral_service import ReferralService
 from bot.services.subscription_service import SubscriptionService
 from bot.services.panel_api_service import PanelApiService
 from bot.services.notification_service import NotificationService
@@ -20,11 +21,50 @@ from .start import send_main_menu
 router = Router(name="user_trial_router")
 
 
+async def _handle_post_trial_activation(
+    callback: types.CallbackQuery,
+    settings: Settings,
+    i18n: JsonI18n,
+    session: AsyncSession,
+    referral_service: ReferralService,
+    user_id: int,
+    end_date_obj: datetime,
+):
+    try:
+        await referral_service.apply_referral_bonus_for_trial_activation(
+            session, user_id
+        )
+        await session.commit()
+    except Exception as exc:
+        await session.rollback()
+        logging.error(
+            "Failed to apply inviter trial referral bonus for user %s: %s",
+            user_id,
+            exc,
+            exc_info=True,
+        )
+
+    notification_service = NotificationService(callback.bot, settings, i18n)
+    await notification_service.notify_trial_activation(user_id, end_date_obj)
+
+    try:
+        from db.dal import ad_dal as _ad_dal
+
+        await _ad_dal.mark_trial_activated(session, user_id)
+        await session.commit()
+    except Exception as exc:
+        await session.rollback()
+        logging.error(
+            f"Failed to mark trial for ad attribution for user {user_id}: {exc}"
+        )
+
+
 async def request_trial_confirmation_handler(
     callback: types.CallbackQuery,
     settings: Settings,
     i18n_data: dict,
     subscription_service: SubscriptionService,
+    referral_service: ReferralService,
     session: AsyncSession,
 ):
     user_id = callback.from_user.id
@@ -114,17 +154,16 @@ async def request_trial_confirmation_handler(
             traffic_gb=traffic_display,
         )
         
-        # Send notification to admin about new trial
-        notification_service = NotificationService(callback.bot, settings, i18n)
-        await notification_service.notify_trial_activation(user_id, end_date_obj)
-        # Mark ad attribution trial if exists
-        try:
-            from db.dal import ad_dal as _ad_dal
-            await _ad_dal.mark_trial_activated(session, user_id)
-            await session.commit()
-        except Exception as e_mark:
-            await session.rollback()
-            logging.error(f"Failed to mark trial for ad attribution for user {user_id}: {e_mark}")
+        if end_date_obj:
+            await _handle_post_trial_activation(
+                callback,
+                settings,
+                i18n,
+                session,
+                referral_service,
+                user_id,
+                end_date_obj,
+            )
     else:
         message_key_from_service = (
             activation_result.get("message_key", "trial_activation_failed")
@@ -185,6 +224,7 @@ async def confirm_activate_trial_handler(
     settings: Settings,
     i18n_data: dict,
     subscription_service: SubscriptionService,
+    referral_service: ReferralService,
     panel_service: PanelApiService,
     session: AsyncSession,
 ):
@@ -319,15 +359,15 @@ async def confirm_activate_trial_handler(
             )
 
     if activation_result and activation_result.get("activated") and end_date_obj:
-        notification_service = NotificationService(callback.bot, settings, i18n)
-        await notification_service.notify_trial_activation(user_id, end_date_obj)
-        try:
-            from db.dal import ad_dal as _ad_dal
-            await _ad_dal.mark_trial_activated(session, user_id)
-            await session.commit()
-        except Exception as e_mark:
-            await session.rollback()
-            logging.error(f"Failed to mark trial for ad attribution for user {user_id}: {e_mark}")
+        await _handle_post_trial_activation(
+            callback,
+            settings,
+            i18n,
+            session,
+            referral_service,
+            user_id,
+            end_date_obj,
+        )
 
 
 @router.callback_query(F.data == "main_action:cancel_trial")

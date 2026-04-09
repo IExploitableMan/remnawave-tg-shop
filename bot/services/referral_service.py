@@ -24,6 +24,75 @@ class ReferralService:
         self.bot = bot
         self.i18n = i18n
 
+    async def apply_referral_bonus_for_trial_activation(
+            self, session: AsyncSession,
+            referee_user_id: int) -> Dict[str, Any]:
+
+        if not getattr(self.settings, "REFERRAL_ENABLED", True):
+            return {"inviter_bonus_applied_flag": False}
+
+        inviter_bonus_days = self.settings.REFERRAL_BONUS_DAYS_INVITER_TRIAL
+        if not inviter_bonus_days or inviter_bonus_days <= 0:
+            return {"inviter_bonus_applied_flag": False}
+
+        referee_user_model = await user_dal.get_user_by_id(session,
+                                                           referee_user_id)
+        if not referee_user_model or referee_user_model.referred_by_id is None:
+            return {"inviter_bonus_applied_flag": False}
+
+        inviter_user_id = referee_user_model.referred_by_id
+        inviter_user_model = await user_dal.get_user_by_id(session,
+                                                           inviter_user_id)
+        if not inviter_user_model:
+            logging.warning(
+                "Inviter user %s not found for trial referral bonus.",
+                inviter_user_id,
+            )
+            return {"inviter_bonus_applied_flag": False}
+
+        referee_name_for_msg = (
+            referee_user_model.first_name or f"User {referee_user_id}")
+        new_end_date_inviter = (
+            await self.subscription_service.extend_active_subscription_days(
+                session=session,
+                user_id=inviter_user_id,
+                bonus_days=inviter_bonus_days,
+                reason=f"trial referral bonus from {referee_name_for_msg}",
+            ))
+        if not new_end_date_inviter:
+            logging.warning(
+                "Failed to apply inviter trial referral bonus for user %s.",
+                inviter_user_id,
+            )
+            return {"inviter_bonus_applied_flag": False}
+
+        default_lang = self.settings.DEFAULT_LANGUAGE
+        inviter_lang = inviter_user_model.language_code or default_lang
+        _i = lambda k, **kw: self.i18n.gettext(inviter_lang, k, **kw)
+
+        try:
+            await self.bot.send_message(
+                inviter_user_id,
+                _i(
+                    "referral_bonus_inviter_trial_notification",
+                    days=inviter_bonus_days,
+                    referee_name=referee_name_for_msg,
+                    new_end_date=new_end_date_inviter.strftime("%Y-%m-%d"),
+                ),
+            )
+        except Exception as exc:
+            logging.error(
+                "Failed to send trial referral bonus notification to inviter %s: %s",
+                inviter_user_id,
+                exc,
+            )
+
+        return {
+            "inviter_bonus_applied_flag": True,
+            "inviter_bonus_applied_days": inviter_bonus_days,
+            "inviter_new_end_date": new_end_date_inviter,
+        }
+
     async def apply_referral_bonuses_for_payment(
             self,
             session: AsyncSession,

@@ -22,6 +22,7 @@ def _payment_kind_label(payment: Payment) -> str:
     kind = (payment.kind or "base_subscription").strip().lower()
     labels = {
         "base_subscription": "Base",
+        "combined_subscription": "Upgraded",
         "addon_subscription": "Add-on",
         "addon_traffic_topup": "Add-on Top-up",
     }

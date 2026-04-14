@@ -12,6 +12,7 @@ from sqlalchemy.future import select
 from config.settings import Settings
 from bot.keyboards.inline.user_keyboards import (
     get_product_catalog_keyboard,
+    get_offer_selection_keyboard,
     get_back_to_main_menu_markup,
     get_autorenew_confirm_keyboard,
 )
@@ -23,7 +24,13 @@ from bot.services.panel_api_service import PanelApiService
 from bot.middlewares.i18n import JsonI18n
 from db.dal import subscription_dal, user_billing_dal
 from db.models import Subscription
-from bot.utils.product_kinds import SUBSCRIPTION_KIND_ADDON, SUBSCRIPTION_KIND_BASE
+from bot.utils.product_kinds import (
+    PAYMENT_KIND_BASE_SUBSCRIPTION,
+    PAYMENT_KIND_COMBINED_SUBSCRIPTION,
+    PAYMENT_KIND_ADDON_TRAFFIC_TOPUP,
+    SUBSCRIPTION_KIND_ADDON,
+    SUBSCRIPTION_KIND_BASE,
+)
 
 router = Router(name="user_subscription_core_router")
 
@@ -131,24 +138,29 @@ async def display_subscription_options(
     )
 
     base_options = await _build_display_options(settings.subscription_options or {}, "base_subscription")
-    addon_option_map = (
+    combined_options = (
+        await _build_display_options(settings.combined_subscription_options or {}, PAYMENT_KIND_COMBINED_SUBSCRIPTION)
+        if settings.addon_enabled
+        else {}
+    )
+    addon_upgrade_options = (
         await _build_display_options(settings.addon_subscription_options or {}, "addon_subscription")
         if base_active_sub and settings.addon_enabled
         else {}
     )
-    addon_option = addon_option_map.get(1.0)
     addon_topups = (
         await _build_display_options(settings.addon_traffic_packages or {}, "addon_traffic_topup")
         if addon_active_sub
         else {}
     )
 
-    if base_options or addon_option or addon_topups:
+    if base_options or combined_options or addon_upgrade_options or addon_topups:
         text_content = get_text("select_subscription_catalog")
         reply_markup = get_product_catalog_keyboard(
-            base_options=base_options,
-            addon_option=addon_option,
-            addon_topups=addon_topups,
+            show_base_plan=bool(base_options),
+            show_combined_plan=bool(combined_options),
+            show_addon_upgrade=bool(addon_upgrade_options),
+            show_addon_topup=bool(addon_topups),
             lang=current_lang,
             i18n_instance=i18n,
         )
@@ -189,6 +201,111 @@ async def reshow_subscription_options_callback(
     await display_subscription_options(
         callback, i18n_data, settings, session, promo_code_service=promo_code_service
     )
+
+
+@router.callback_query(F.data.startswith("subscription_catalog:"))
+async def show_tariff_offer_options_callback(
+    callback: types.CallbackQuery,
+    i18n_data: dict,
+    settings: Settings,
+    session: AsyncSession,
+    promo_code_service=None,
+):
+    current_lang = i18n_data.get("current_language", settings.DEFAULT_LANGUAGE)
+    i18n: Optional[JsonI18n] = i18n_data.get("i18n_instance")
+    if not i18n or not callback.message:
+        await callback.answer("Error", show_alert=True)
+        return
+    get_text = lambda key, **kwargs: i18n.gettext(current_lang, key, **kwargs)
+
+    try:
+        product_code = callback.data.split(":", 1)[1]
+    except Exception:
+        await callback.answer(get_text("error_try_again"), show_alert=True)
+        return
+
+    async def _build_display_options(raw_options, payment_kind: str):
+        display: dict[float, tuple[float, str]] = {}
+        active_discount_info = None
+        if promo_code_service:
+            try:
+                active_discount_info = await promo_code_service.get_user_active_discount(
+                    session,
+                    callback.from_user.id,
+                    payment_kind=payment_kind,
+                )
+            except Exception:
+                active_discount_info = None
+        for raw_value in raw_options.keys():
+            effective_value = float(raw_value)
+            rub_price = resolve_base_price(settings, effective_value, payment_kind, stars=False)
+            stars_price = resolve_base_price(settings, effective_value, payment_kind, stars=True)
+            if active_discount_info:
+                discount_pct, _promo_code = active_discount_info
+                if rub_price is not None:
+                    rub_price, _ = promo_code_service.calculate_discounted_price(rub_price, discount_pct)
+                if stars_price is not None:
+                    discounted_stars_price, _ = promo_code_service.calculate_discounted_price(float(stars_price), discount_pct)
+                    stars_price = math.ceil(discounted_stars_price)
+            if rub_price is not None:
+                display[effective_value] = (rub_price, "RUB")
+            elif stars_price is not None:
+                display[effective_value] = (float(stars_price), "⭐")
+        return display
+
+    if product_code == "base":
+        offers = await _build_display_options(settings.subscription_options or {}, PAYMENT_KIND_BASE_SUBSCRIPTION)
+        text_content = get_text("base_plan_offer_description")
+        reply_markup = get_offer_selection_keyboard(
+            offers=offers,
+            callback_prefix="subscribe_period",
+            lang=current_lang,
+            i18n_instance=i18n,
+            back_callback="main_action:subscribe",
+        )
+    elif product_code == "combined":
+        offers = await _build_display_options(settings.combined_subscription_options or {}, PAYMENT_KIND_COMBINED_SUBSCRIPTION)
+        text_content = get_text(
+            "combined_plan_offer_description",
+            monthly_traffic=f"{settings.ADDON_MONTHLY_TRAFFIC_GB:g}" if settings.ADDON_MONTHLY_TRAFFIC_GB else "0",
+        )
+        reply_markup = get_offer_selection_keyboard(
+            offers=offers,
+            callback_prefix="subscribe_combined_period",
+            lang=current_lang,
+            i18n_instance=i18n,
+            back_callback="main_action:subscribe",
+        )
+    elif product_code == "addon_upgrade":
+        offers = await _build_display_options(settings.addon_subscription_options or {}, "addon_subscription")
+        text_content = get_text("addon_upgrade_offer_description")
+        reply_markup = get_offer_selection_keyboard(
+            offers=offers,
+            callback_prefix="subscribe_addon_period",
+            lang=current_lang,
+            i18n_instance=i18n,
+            back_callback="main_action:subscribe",
+        )
+    elif product_code == "addon_topup":
+        offers = await _build_display_options(settings.addon_traffic_packages or {}, PAYMENT_KIND_ADDON_TRAFFIC_TOPUP)
+        text_content = get_text("addon_topup_offer_description")
+        reply_markup = get_offer_selection_keyboard(
+            offers=offers,
+            callback_prefix="subscribe_addon_traffic",
+            lang=current_lang,
+            i18n_instance=i18n,
+            traffic_mode=True,
+            back_callback="main_action:subscribe",
+        )
+    else:
+        await callback.answer(get_text("error_try_again"), show_alert=True)
+        return
+
+    try:
+        await callback.message.edit_text(text_content, reply_markup=reply_markup)
+    except Exception:
+        await callback.message.answer(text_content, reply_markup=reply_markup)
+    await callback.answer()
 
 
 async def my_subscription_command_handler(

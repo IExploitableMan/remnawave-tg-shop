@@ -10,6 +10,8 @@ from db.models import PromoCode, PromoCodeActivation, User, Payment
 
 def _applicability_column_for_payment_kind(payment_kind: Optional[str]):
     normalized = (payment_kind or "base_subscription").strip().lower()
+    if normalized == "combined_subscription":
+        return PromoCode.applies_to_addon_subscription
     if normalized == "addon_subscription":
         return PromoCode.applies_to_addon_subscription
     if normalized == "addon_traffic_topup":

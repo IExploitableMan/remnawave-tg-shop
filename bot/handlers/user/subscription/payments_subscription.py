@@ -17,6 +17,7 @@ from bot.middlewares.i18n import JsonI18n
 from config.settings import Settings
 from db.dal import subscription_dal
 from bot.utils.product_kinds import SUBSCRIPTION_KIND_ADDON, SUBSCRIPTION_KIND_BASE
+from bot.utils.product_kinds import PAYMENT_KIND_COMBINED_SUBSCRIPTION
 
 router = Router(name="user_subscription_payments_selection_router")
 
@@ -175,7 +176,9 @@ async def _render_payment_method_selection(
                 logging.debug("Suppressed exception in bot/handlers/user/subscription/payments_subscription.py: %s", exc)
             return
 
-    if payment_kind == "addon_subscription":
+    if payment_kind == PAYMENT_KIND_COMBINED_SUBSCRIPTION:
+        text_content = get_text("choose_payment_method_combined")
+    elif payment_kind == "addon_subscription":
         text_content = get_text("choose_payment_method_addon")
     elif is_traffic_payment_kind(payment_kind):
         text_content = get_text("choose_payment_method_traffic")
@@ -252,6 +255,30 @@ async def select_addon_subscription_period_callback_handler(
         session,
         raw_value=raw_value,
         payment_kind="addon_subscription",
+        promo_code_service=promo_code_service,
+    )
+
+
+@router.callback_query(F.data.startswith("subscribe_combined_period:"))
+async def select_combined_subscription_period_callback_handler(
+    callback: types.CallbackQuery,
+    settings: Settings,
+    i18n_data: dict,
+    session: AsyncSession,
+    promo_code_service=None,
+):
+    try:
+        raw_value = float(callback.data.split(":")[-1])
+    except (ValueError, IndexError):
+        await callback.answer("Error", show_alert=True)
+        return
+    await _render_payment_method_selection(
+        callback,
+        settings,
+        i18n_data,
+        session,
+        raw_value=raw_value,
+        payment_kind="combined_subscription",
         promo_code_service=promo_code_service,
     )
 

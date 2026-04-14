@@ -574,6 +574,36 @@ class Settings(BaseSettings):
 
     @computed_field
     @property
+    def combined_subscription_options(self) -> Dict[int, float]:
+        options: Dict[int, float] = {}
+        addon_month_price = (
+            float(self.ADDON_RUB_PRICE_1_MONTH)
+            if self.ADDON_RUB_PRICE_1_MONTH is not None
+            else None
+        )
+        if addon_month_price is None:
+            return options
+        for months, base_price in (self.subscription_options or {}).items():
+            options[int(months)] = float(base_price) + addon_month_price * int(months)
+        return options
+
+    @computed_field
+    @property
+    def combined_stars_subscription_options(self) -> Dict[int, int]:
+        options: Dict[int, int] = {}
+        addon_month_price = (
+            int(self.ADDON_STARS_PRICE_1_MONTH)
+            if self.STARS_ENABLED and self.ADDON_STARS_PRICE_1_MONTH is not None
+            else None
+        )
+        if addon_month_price is None:
+            return options
+        for months, base_price in (self.stars_subscription_options or {}).items():
+            options[int(months)] = int(base_price) + addon_month_price * int(months)
+        return options
+
+    @computed_field
+    @property
     def addon_traffic_packages(self) -> Dict[float, float]:
         raw = (self.ADDON_TRAFFIC_PACKAGES or self.TRAFFIC_PACKAGES or "").strip()
         packages: Dict[float, float] = {}

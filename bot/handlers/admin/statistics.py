@@ -16,6 +16,16 @@ from bot.middlewares.i18n import JsonI18n
 router = Router(name="admin_statistics_router")
 
 
+def _payment_kind_label(kind: str) -> str:
+    labels = {
+        "base_subscription": "Base",
+        "combined_subscription": "Upgraded",
+        "addon_subscription": "Add-on only",
+        "addon_traffic_topup": "Add-on Top-up",
+    }
+    return labels.get((kind or "").strip().lower(), kind or "Unknown")
+
+
 async def show_statistics_handler(callback: types.CallbackQuery,
                                   i18n_data: dict, settings: Settings,
                                   session: AsyncSession):
@@ -156,12 +166,13 @@ async def show_statistics_handler(callback: types.CallbackQuery,
     )
     revenue_by_kind = financial_stats.get("revenue_by_kind") or {}
     if revenue_by_kind:
-        stats_text_parts.append(
-            "🧩 Base / Add-on / Top-up: "
-            f"<b>{float(revenue_by_kind.get('base_subscription', 0) or 0):.2f}</b> / "
-            f"<b>{float(revenue_by_kind.get('addon_subscription', 0) or 0):.2f}</b> / "
-            f"<b>{float(revenue_by_kind.get('addon_traffic_topup', 0) or 0):.2f}</b> RUB"
-        )
+        stats_text_parts.append("🧩 <b>По тарифам и типам оплат:</b>")
+        for payment_kind, info in revenue_by_kind.items():
+            revenue = float((info or {}).get("revenue", 0) or 0)
+            count = int((info or {}).get("count", 0) or 0)
+            stats_text_parts.append(
+                f"• {_payment_kind_label(payment_kind)}: <b>{revenue:.2f} RUB</b> ({count})"
+            )
 
     last_payments_models: List[
         Payment] = await payment_dal.get_recent_payment_logs_with_user(session,
@@ -199,7 +210,7 @@ async def show_statistics_handler(callback: types.CallbackQuery,
                 _("admin_stats_payment_item",
                   status_emoji=status_emoji,
                   amount=payment.amount,
-                  currency=f"{payment.currency} / {payment.kind or 'base_subscription'}",
+                  currency=f"{payment.currency} / {_payment_kind_label(payment.kind or 'base_subscription')}",
                   user_info=user_info,
                   p_status=payment.status,
                   p_date=payment_date_str))

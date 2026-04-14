@@ -45,6 +45,8 @@ def _parse_offer_payload(payload: str) -> Optional[Tuple[float, float, str]]:
 def _get_back_offer_callback(value: float, payment_kind: str) -> str:
     value_str = _format_value(value)
     payment_kind = normalize_payment_kind(payment_kind)
+    if payment_kind == "combined_subscription":
+        return f"subscribe_combined_period:{value_str}"
     if payment_kind == "addon_subscription":
         return f"subscribe_addon_period:{value_str}"
     if payment_kind == "addon_traffic_topup":

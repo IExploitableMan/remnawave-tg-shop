@@ -29,6 +29,7 @@ class AdminStates(StatesGroup):
     # User management states
     waiting_for_user_search = State()
     waiting_for_subscription_days_to_add = State()
+    waiting_for_addon_traffic_gb_to_add = State()
     waiting_for_direct_message_to_user = State()
     waiting_for_user_delete_confirmation = State()
 

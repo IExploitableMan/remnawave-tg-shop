@@ -134,54 +134,41 @@ def get_subscription_options_keyboard(subscription_options: Dict[
 
 def get_product_catalog_keyboard(
     *,
-    base_options: Dict[float, Tuple[float, str]],
-    addon_option: Optional[Tuple[float, str]],
-    addon_topups: Dict[float, Tuple[float, str]],
+    show_base_plan: bool,
+    show_combined_plan: bool,
+    show_addon_upgrade: bool,
+    show_addon_topup: bool,
     lang: str,
     i18n_instance,
 ) -> InlineKeyboardMarkup:
     _ = lambda key, **kwargs: i18n_instance.gettext(lang, key, **kwargs)
     builder = InlineKeyboardBuilder()
-
-    def _format_value(val: float) -> str:
-        return str(int(val)) if float(val).is_integer() else f"{val:g}"
-
-    for months, (price, currency_symbol) in base_options.items():
+    if show_base_plan:
         builder.row(
             InlineKeyboardButton(
-                text=_(
-                    "subscribe_for_months_button",
-                    months=int(months) if float(months).is_integer() else months,
-                    price=price,
-                    currency_symbol=currency_symbol,
-                ),
-                callback_data=f"subscribe_period:{_format_value(months)}",
+                text=_("choose_base_plan_button"),
+                callback_data="subscription_catalog:base",
             )
         )
-
-    if addon_option is not None:
-        addon_price, addon_currency = addon_option
+    if show_combined_plan:
         builder.row(
             InlineKeyboardButton(
-                text=_(
-                    "buy_addon_month_button",
-                    price=addon_price,
-                    currency_symbol=addon_currency,
-                ),
-                callback_data="subscribe_addon_period:1",
+                text=_("choose_combined_plan_button"),
+                callback_data="subscription_catalog:combined",
             )
         )
-
-    for traffic_gb, (price, currency_symbol) in addon_topups.items():
+    if show_addon_upgrade:
         builder.row(
             InlineKeyboardButton(
-                text=_(
-                    "buy_addon_traffic_package_button",
-                    traffic_gb=_format_value(traffic_gb),
-                    price=price,
-                    currency_symbol=currency_symbol,
-                ),
-                callback_data=f"subscribe_addon_traffic:{_format_value(traffic_gb)}",
+                text=_("choose_addon_upgrade_button"),
+                callback_data="subscription_catalog:addon_upgrade",
+            )
+        )
+    if show_addon_topup:
+        builder.row(
+            InlineKeyboardButton(
+                text=_("choose_addon_topup_button"),
+                callback_data="subscription_catalog:addon_topup",
             )
         )
 
@@ -189,6 +176,53 @@ def get_product_catalog_keyboard(
         InlineKeyboardButton(
             text=_(key="back_to_main_menu_button"),
             callback_data="main_action:back_to_main",
+        )
+    )
+    return builder.as_markup()
+
+
+def get_offer_selection_keyboard(
+    *,
+    offers: Dict[float, Tuple[float, str]],
+    callback_prefix: str,
+    lang: str,
+    i18n_instance,
+    traffic_mode: bool = False,
+    back_callback: str = "main_action:subscribe",
+) -> InlineKeyboardMarkup:
+    _ = lambda key, **kwargs: i18n_instance.gettext(lang, key, **kwargs)
+    builder = InlineKeyboardBuilder()
+
+    def _format_value(val: float) -> str:
+        return str(int(val)) if float(val).is_integer() else f"{val:g}"
+
+    for raw_value, (price, currency_symbol) in offers.items():
+        formatted_value = _format_value(raw_value)
+        if traffic_mode:
+            text = _(
+                "buy_addon_traffic_package_button",
+                traffic_gb=formatted_value,
+                price=price,
+                currency_symbol=currency_symbol,
+            )
+        else:
+            text = _(
+                "subscribe_for_months_button",
+                months=int(raw_value) if float(raw_value).is_integer() else raw_value,
+                price=price,
+                currency_symbol=currency_symbol,
+            )
+        builder.row(
+            InlineKeyboardButton(
+                text=text,
+                callback_data=f"{callback_prefix}:{formatted_value}",
+            )
+        )
+
+    builder.row(
+        InlineKeyboardButton(
+            text=_(key="back_button"),
+            callback_data=back_callback,
         )
     )
     return builder.as_markup()

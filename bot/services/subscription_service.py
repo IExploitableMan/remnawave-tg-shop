@@ -14,6 +14,7 @@ from bot.utils.product_kinds import (
     PAYMENT_KIND_ADDON_SUBSCRIPTION,
     PAYMENT_KIND_ADDON_TRAFFIC_TOPUP,
     PAYMENT_KIND_BASE_SUBSCRIPTION,
+    PAYMENT_KIND_COMBINED_SUBSCRIPTION,
     SUBSCRIPTION_KIND_ADDON,
     SUBSCRIPTION_KIND_BASE,
     normalize_payment_kind,
@@ -394,7 +395,7 @@ class SubscriptionService:
         user_id: int,
         months: int,
         payment_amount: float,
-        payment_db_id: int,
+        payment_db_id: Optional[int],
         promo_code_id_from_payment: Optional[int] = None,
         provider: str = "yookassa",
         sale_mode: str = "subscription",
@@ -414,13 +415,24 @@ class SubscriptionService:
                 payment_db_id=payment_db_id,
                 provider=provider,
             )
+        if normalized_payment_kind == PAYMENT_KIND_COMBINED_SUBSCRIPTION:
+            return await self._activate_combined_subscription(
+                session=session,
+                user_id=user_id,
+                months=months,
+                payment_db_id=payment_db_id,
+                provider=provider,
+                promo_code_id_from_payment=promo_code_id_from_payment,
+            )
         if normalized_payment_kind == PAYMENT_KIND_ADDON_SUBSCRIPTION:
             return await self._activate_addon_subscription(
                 session=session,
                 user_id=user_id,
+                months=months,
                 payment_db_id=payment_db_id,
                 provider=provider,
                 promo_code_id_from_payment=promo_code_id_from_payment,
+                require_active_base=True,
             )
         return await self._activate_base_subscription(
             session=session,
@@ -436,7 +448,7 @@ class SubscriptionService:
         session: AsyncSession,
         user_id: int,
         months: int,
-        payment_db_id: int,
+        payment_db_id: Optional[int],
         provider: str,
         promo_code_id_from_payment: Optional[int],
     ) -> Optional[Dict[str, Any]]:
@@ -531,15 +543,17 @@ class SubscriptionService:
         self,
         session: AsyncSession,
         user_id: int,
-        payment_db_id: int,
+        months: int,
+        payment_db_id: Optional[int],
         provider: str,
         promo_code_id_from_payment: Optional[int],
+        require_active_base: bool,
     ) -> Optional[Dict[str, Any]]:
         if not self.settings.addon_enabled:
             logging.warning("Add-on subscription purchase rejected: add-on is not configured.")
             return None
         base_sub = await subscription_dal.get_active_subscription_by_user_id(session, user_id, kind=SUBSCRIPTION_KIND_BASE)
-        if not base_sub:
+        if require_active_base and not base_sub:
             logging.warning("Add-on subscription purchase rejected: user %s has no active base subscription.", user_id)
             return None
 
@@ -567,7 +581,10 @@ class SubscriptionService:
         if current_active_sub and current_active_sub.end_date and current_active_sub.end_date > now_utc:
             start_date = current_active_sub.end_date
 
-        new_end_date = add_months(start_date, 1)
+        months_int = max(1, int(months or 1))
+        new_end_date = add_months(start_date, months_int)
+        if require_active_base and base_sub and base_sub.end_date:
+            new_end_date = min(new_end_date, base_sub.end_date)
         applied_bonus_days = await self._consume_bonus_promo_for_payment(
             session,
             user_id=user_id,
@@ -577,6 +594,8 @@ class SubscriptionService:
         )
         if applied_bonus_days:
             new_end_date = new_end_date + timedelta(days=applied_bonus_days)
+        if require_active_base and base_sub and base_sub.end_date:
+            new_end_date = min(new_end_date, base_sub.end_date)
 
         traffic_cycle_started_at = None
         traffic_cycle_ends_at = None
@@ -600,7 +619,7 @@ class SubscriptionService:
                 "kind": SUBSCRIPTION_KIND_ADDON,
                 "start_date": current_active_sub.start_date if current_active_sub and current_active_sub.start_date else now_utc,
                 "end_date": new_end_date,
-                "duration_months": 1,
+                "duration_months": months_int,
                 "is_active": True,
                 "status_from_panel": "ACTIVE",
                 "traffic_limit_bytes": 0,
@@ -635,8 +654,54 @@ class SubscriptionService:
             "subscription_url": panel_user_data.get("subscriptionUrl") or await self.panel_service.get_subscription_link(panel_short_uuid or panel_sub_link_id),
             "applied_promo_bonus_days": applied_bonus_days,
             "payment_kind": PAYMENT_KIND_ADDON_SUBSCRIPTION,
-            "warning_base_ends_before_addon": base_sub.end_date < new_end_date,
-            "base_end_date": base_sub.end_date,
+            "warning_base_ends_before_addon": bool(base_sub and base_sub.end_date < new_end_date),
+            "base_end_date": base_sub.end_date if base_sub else None,
+        }
+
+    async def _activate_combined_subscription(
+        self,
+        session: AsyncSession,
+        user_id: int,
+        months: int,
+        payment_db_id: Optional[int],
+        provider: str,
+        promo_code_id_from_payment: Optional[int],
+    ) -> Optional[Dict[str, Any]]:
+        months_int = max(1, int(months or 1))
+        base_activation = await self._activate_base_subscription(
+            session=session,
+            user_id=user_id,
+            months=months_int,
+            payment_db_id=payment_db_id,
+            provider=provider,
+            promo_code_id_from_payment=promo_code_id_from_payment,
+        )
+        if not base_activation:
+            return None
+
+        addon_activation = await self._activate_addon_subscription(
+            session=session,
+            user_id=user_id,
+            months=months_int,
+            payment_db_id=None,
+            provider=provider,
+            promo_code_id_from_payment=None,
+            require_active_base=False,
+        )
+        if not addon_activation:
+            return None
+
+        return {
+            "payment_kind": PAYMENT_KIND_COMBINED_SUBSCRIPTION,
+            "end_date": base_activation.get("end_date"),
+            "addon_end_date": addon_activation.get("end_date"),
+            "panel_user_uuid": base_activation.get("panel_user_uuid"),
+            "addon_panel_user_uuid": addon_activation.get("panel_user_uuid"),
+            "subscription_url": base_activation.get("subscription_url"),
+            "addon_subscription_url": addon_activation.get("subscription_url"),
+            "panel_short_uuid": base_activation.get("panel_short_uuid"),
+            "addon_panel_short_uuid": addon_activation.get("panel_short_uuid"),
+            "applied_promo_bonus_days": base_activation.get("applied_promo_bonus_days", 0),
         }
 
     async def _activate_addon_topup(
@@ -644,7 +709,7 @@ class SubscriptionService:
         session: AsyncSession,
         user_id: int,
         traffic_gb: float,
-        payment_db_id: int,
+        payment_db_id: Optional[int],
         provider: str,
     ) -> Optional[Dict[str, Any]]:
         addon_sub = await subscription_dal.get_active_subscription_by_user_id(session, user_id, kind=SUBSCRIPTION_KIND_ADDON)
@@ -694,11 +759,11 @@ class SubscriptionService:
         session: AsyncSession,
         *,
         user_id: int,
-        payment_db_id: int,
+        payment_db_id: Optional[int],
         promo_code_id: Optional[int],
         payment_kind: str,
     ) -> int:
-        if not promo_code_id:
+        if not promo_code_id or payment_db_id is None:
             return 0
         promo_model = await promo_code_dal.get_promo_code_by_id(session, promo_code_id)
         if not promo_model or promo_model.promo_type != "bonus_days" or not promo_model.is_active:
@@ -722,7 +787,9 @@ class SubscriptionService:
             await promo_code_dal.increment_promo_code_usage(session, promo_code_id, allow_overflow=True)
         return int(promo_model.bonus_days or 0)
 
-    async def _consume_discount_if_present(self, session: AsyncSession, user_id: int, payment_db_id: int) -> None:
+    async def _consume_discount_if_present(self, session: AsyncSession, user_id: int, payment_db_id: Optional[int]) -> None:
+        if payment_db_id is None:
+            return
         try:
             promo_code_service = getattr(self, "promo_code_service", None)
             if not promo_code_service:
@@ -803,6 +870,41 @@ class SubscriptionService:
         await self.panel_service.update_user_details_on_panel(panel_uuid, panel_update_payload)
         await self._restore_addon_if_possible(session, user_id)
         return new_end_date_obj
+
+    async def admin_grant_combined_subscription(
+        self,
+        session: AsyncSession,
+        user_id: int,
+        months: int,
+    ) -> Optional[Dict[str, Any]]:
+        return await self.activate_subscription(
+            session=session,
+            user_id=user_id,
+            months=max(1, int(months or 1)),
+            payment_amount=0.0,
+            payment_db_id=None,
+            provider="admin_manual",
+            sale_mode=PAYMENT_KIND_COMBINED_SUBSCRIPTION,
+            payment_kind=PAYMENT_KIND_COMBINED_SUBSCRIPTION,
+        )
+
+    async def admin_grant_addon_topup(
+        self,
+        session: AsyncSession,
+        user_id: int,
+        traffic_gb: float,
+    ) -> Optional[Dict[str, Any]]:
+        return await self.activate_subscription(
+            session=session,
+            user_id=user_id,
+            months=0,
+            payment_amount=0.0,
+            payment_db_id=None,
+            provider="admin_manual",
+            sale_mode=PAYMENT_KIND_ADDON_TRAFFIC_TOPUP,
+            traffic_gb=float(traffic_gb),
+            payment_kind=PAYMENT_KIND_ADDON_TRAFFIC_TOPUP,
+        )
 
     async def _fetch_profile_details(
         self,

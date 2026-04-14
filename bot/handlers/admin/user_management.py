@@ -28,9 +28,17 @@ from bot.utils.telegram_markup import (
     is_profile_link_error,
     remove_profile_link_buttons,
 )
-
 router = Router(name="admin_user_management_router")
 USERNAME_REGEX = re.compile(r"^[a-zA-Z0-9_]{5,32}$")
+
+
+def _format_bytes_as_gb(value: Optional[int], na_value: str) -> str:
+    if value is None:
+        return na_value
+    try:
+        return f"{float(value) / (1024 ** 3):.2f} GB"
+    except Exception:
+        return str(value)
 
 
 async def users_list_handler(callback: types.CallbackQuery,
@@ -121,18 +129,26 @@ def get_user_card_keyboard(user_id: int, i18n_instance, lang: str,
         text=_(key="admin_user_add_subscription_button"),
         callback_data=f"user_action:add_subscription:{user_id}"
     )
-    
-    # Row 2: Block/Unblock and Message
     builder.button(
-        text=_(key="admin_user_toggle_ban_button"),
-        callback_data=f"user_action:toggle_ban:{user_id}"
+        text=_(key="admin_user_add_combined_subscription_button"),
+        callback_data=f"user_action:add_combined_subscription:{user_id}"
+    )
+    
+    # Row 2: Add-on traffic and messaging
+    builder.button(
+        text=_(key="admin_user_add_addon_traffic_button"),
+        callback_data=f"user_action:add_addon_traffic:{user_id}"
     )
     builder.button(
         text=_(key="admin_user_send_message_button"),
         callback_data=f"user_action:send_message:{user_id}"
     )
     
-    # Row 3: View actions
+    # Row 3: Block/Unblock and view actions
+    builder.button(
+        text=_(key="admin_user_toggle_ban_button"),
+        callback_data=f"user_action:toggle_ban:{user_id}"
+    )
     builder.button(
         text=_(key="admin_user_view_logs_button"),
         callback_data=f"user_action:view_logs:{user_id}"
@@ -170,7 +186,7 @@ def get_user_card_keyboard(user_id: int, i18n_instance, lang: str,
     )
     
     quick_links_width = 2 if referrer_id else 1
-    builder.adjust(2, 2, 2, quick_links_width, 1, 2)
+    builder.adjust(2, 2, 2, 2, quick_links_width, 1, 2)
     return builder
 
 
@@ -244,30 +260,51 @@ async def format_user_card(user: User, session: AsyncSession,
     # Panel info
     if user.panel_user_uuid:
         card_parts.append(f"{_('admin_user_panel_uuid_label')} {hcode(user.panel_user_uuid[:8] + '...' if len(user.panel_user_uuid) > 8 else user.panel_user_uuid)}")
+    if user.addon_panel_user_uuid:
+        card_parts.append(f"{_('admin_user_addon_panel_uuid_label')} {hcode(user.addon_panel_user_uuid[:8] + '...' if len(user.addon_panel_user_uuid) > 8 else user.addon_panel_user_uuid)}")
     
     card_parts.append("")  # Empty line
     
     # Subscription info
     try:
-        subscription_details = await subscription_service.get_active_subscription_details(session, user.user_id)
-        if subscription_details:
-            card_parts.append(f"💳 <b>{_('admin_user_subscription_info')}</b>")
-            
-            end_date = subscription_details.get('end_date')
-            if end_date:
-                end_date_str = end_date.strftime('%Y-%m-%d %H:%M') if isinstance(end_date, datetime) else str(end_date)
-                card_parts.append(f"{_('admin_user_subscription_active_until')} {hcode(end_date_str)}")
-            
-            status = subscription_details.get('status_from_panel', 'UNKNOWN')
-            card_parts.append(f"{_('admin_user_panel_status_label')} {hcode(status)}")
-            
-            traffic_limit = subscription_details.get('traffic_limit_bytes')
-            traffic_used = subscription_details.get('traffic_used_bytes')
-            if traffic_limit and traffic_used is not None:
-                traffic_limit_gb = traffic_limit / (1024**3)
-                traffic_used_gb = traffic_used / (1024**3)
-                card_parts.append(f"{_('admin_user_traffic_label')} {hcode(f'{traffic_used_gb:.2f}GB / {traffic_limit_gb:.2f}GB')}")
+        subscription_overview = await subscription_service.get_subscription_overview(session, user.user_id)
+        base_details = subscription_overview.get("base")
+        addon_details = subscription_overview.get("addon")
+
+        if addon_details:
+            current_tariff = _("admin_user_tariff_combined")
+        elif base_details:
+            current_tariff = _("admin_user_tariff_base")
         else:
+            current_tariff = _("admin_user_tariff_none")
+        card_parts.append(f"{_('admin_user_current_tariff_label')} {hcode(current_tariff)}")
+
+        if base_details or addon_details:
+            card_parts.append(f"💳 <b>{_('admin_user_subscription_info')}</b>")
+
+        if base_details:
+            end_date = base_details.get("end_date")
+            end_date_str = end_date.strftime('%Y-%m-%d %H:%M') if isinstance(end_date, datetime) else str(end_date or na_value)
+            base_used_text = _format_bytes_as_gb(base_details.get("traffic_used_bytes"), na_value)
+            base_limit_text = _format_bytes_as_gb(base_details.get("traffic_limit_bytes"), na_value)
+            card_parts.append(f"{_('admin_user_base_plan_label')} {hcode(end_date_str)}")
+            card_parts.append(f"{_('admin_user_panel_status_label')} {hcode(base_details.get('status_from_panel', 'UNKNOWN'))}")
+            card_parts.append(f"{_('admin_user_traffic_label')} {hcode(f'{base_used_text} / {base_limit_text}')}")
+
+        if addon_details:
+            addon_end_date = addon_details.get("end_date")
+            addon_end_date_str = addon_end_date.strftime('%Y-%m-%d %H:%M') if isinstance(addon_end_date, datetime) else str(addon_end_date or na_value)
+            card_parts.append(f"{_('admin_user_addon_plan_label')} {hcode(addon_end_date_str)}")
+            card_parts.append(f"{_('admin_user_addon_status_label')} {hcode(str(addon_details.get('addon_state') or addon_details.get('status_from_panel') or 'UNKNOWN').upper())}")
+            card_parts.append(
+                f"{_('admin_user_addon_traffic_label')} "
+                f"{hcode(_format_bytes_as_gb(addon_details.get('traffic_remaining_bytes'), na_value))}"
+            )
+            card_parts.append(
+                f"{_('admin_user_addon_topup_label')} "
+                f"{hcode(_format_bytes_as_gb(addon_details.get('addon_topup_remaining_bytes'), na_value))}"
+            )
+        if not base_details and not addon_details:
             card_parts.append(f"{_('admin_user_subscription_label')} {hcode(_('admin_user_subscription_none'))}")
     except Exception as e:
         logging.error(f"Error getting subscription details for user {user.user_id}: {e}")
@@ -412,6 +449,10 @@ async def user_action_handler(callback: types.CallbackQuery, state: FSMContext,
         await handle_reset_trial(callback, user, subscription_service, session, i18n, current_lang)
     elif action == "add_subscription":
         await handle_add_subscription_prompt(callback, state, user, i18n, current_lang)
+    elif action == "add_combined_subscription":
+        await handle_add_combined_subscription_prompt(callback, user, settings, i18n, current_lang)
+    elif action == "add_addon_traffic":
+        await handle_add_addon_traffic_prompt(callback, state, user, i18n, current_lang)
     elif action == "toggle_ban":
         await handle_toggle_ban(callback, user, panel_service, session, i18n, current_lang)
     elif action == "send_message":
@@ -472,6 +513,54 @@ async def handle_add_subscription_prompt(callback: types.CallbackQuery, state: F
     except Exception:
         await callback.message.answer(prompt_text)
     
+    await callback.answer()
+
+
+async def handle_add_combined_subscription_prompt(
+    callback: types.CallbackQuery,
+    user: User,
+    settings: Settings,
+    i18n_instance,
+    lang: str,
+):
+    _ = lambda key, **kwargs: i18n_instance.gettext(lang, key, **kwargs)
+    builder = InlineKeyboardBuilder()
+    for months in sorted((settings.subscription_options or {}).keys()):
+        builder.row(
+            InlineKeyboardButton(
+                text=_("admin_user_add_combined_option_button", months=months),
+                callback_data=f"admin_add_combined_month:{user.user_id}:{int(months)}",
+            )
+        )
+    builder.row(
+        InlineKeyboardButton(
+            text=_("admin_user_back_to_card_button"),
+            callback_data=f"user_action:refresh:{user.user_id}",
+        )
+    )
+    prompt_text = _("admin_user_add_combined_prompt", user_id=user.user_id)
+    try:
+        await callback.message.edit_text(prompt_text, reply_markup=builder.as_markup())
+    except Exception:
+        await callback.message.answer(prompt_text, reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+async def handle_add_addon_traffic_prompt(
+    callback: types.CallbackQuery,
+    state: FSMContext,
+    user: User,
+    i18n_instance,
+    lang: str,
+):
+    _ = lambda key, **kwargs: i18n_instance.gettext(lang, key, **kwargs)
+    await state.update_data(target_user_id=user.user_id)
+    await state.set_state(AdminStates.waiting_for_addon_traffic_gb_to_add)
+    prompt_text = _("admin_user_addon_topup_prompt", user_id=user.user_id)
+    try:
+        await callback.message.edit_text(prompt_text)
+    except Exception:
+        await callback.message.answer(prompt_text)
     await callback.answer()
 
 
@@ -920,6 +1009,129 @@ async def process_subscription_days_handler(message: types.Message, state: FSMCo
             "admin_user_subscription_added_error"
         ))
     
+    await state.clear()
+
+
+@router.callback_query(F.data.startswith("admin_add_combined_month:"))
+async def process_admin_add_combined_month_callback(
+    callback: types.CallbackQuery,
+    settings: Settings,
+    i18n_data: dict,
+    subscription_service: SubscriptionService,
+    session: AsyncSession,
+):
+    current_lang = i18n_data.get("current_language", settings.DEFAULT_LANGUAGE)
+    i18n: Optional[JsonI18n] = i18n_data.get("i18n_instance")
+    if not i18n or not callback.message:
+        await callback.answer("Language service error.", show_alert=True)
+        return
+    _ = lambda key, **kwargs: i18n.gettext(current_lang, key, **kwargs)
+
+    try:
+        _, user_id_str, months_str = callback.data.split(":")
+        target_user_id = int(user_id_str)
+        months = int(months_str)
+    except (TypeError, ValueError):
+        await callback.answer(_("error_try_again"), show_alert=True)
+        return
+
+    try:
+        activation = await subscription_service.admin_grant_combined_subscription(
+            session,
+            target_user_id,
+            months,
+        )
+        if not activation:
+            await session.rollback()
+            await callback.answer(_("admin_user_add_combined_error"), show_alert=True)
+            return
+
+        await session.commit()
+        await callback.answer(
+            _("admin_user_add_combined_success", months=months, user_id=target_user_id),
+            show_alert=True,
+        )
+        user = await user_dal.get_user_by_id(session, target_user_id)
+        if user:
+            referral_service = ReferralService(settings, subscription_service, callback.message.bot, i18n)
+            user_card_text = await format_user_card(user, session, subscription_service, i18n, current_lang, referral_service)
+            keyboard = get_user_card_keyboard(user.user_id, i18n, current_lang, user.referred_by_id)
+            await _send_with_profile_link_fallback(
+                callback.message.edit_text,
+                text=user_card_text,
+                markup=keyboard.as_markup(),
+                user_id=user.user_id,
+                parse_mode="HTML",
+            )
+    except Exception as e:
+        logging.error("Error granting combined subscription to user %s: %s", target_user_id, e, exc_info=True)
+        await session.rollback()
+        await callback.answer(_("admin_user_add_combined_error"), show_alert=True)
+
+
+@router.message(AdminStates.waiting_for_addon_traffic_gb_to_add, F.text)
+async def process_admin_addon_traffic_handler(
+    message: types.Message,
+    state: FSMContext,
+    settings: Settings,
+    i18n_data: dict,
+    subscription_service: SubscriptionService,
+    session: AsyncSession,
+):
+    current_lang = i18n_data.get("current_language", settings.DEFAULT_LANGUAGE)
+    i18n: Optional[JsonI18n] = i18n_data.get("i18n_instance")
+    if not i18n:
+        await message.reply("Language service error.")
+        return
+    _ = lambda key, **kwargs: i18n.gettext(current_lang, key, **kwargs)
+
+    data = await state.get_data()
+    target_user_id = data.get("target_user_id")
+    if not target_user_id:
+        await message.answer(_("admin_user_addon_topup_error"))
+        await state.clear()
+        return
+
+    try:
+        traffic_gb = float((message.text or "").strip().replace(",", "."))
+        if traffic_gb <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer(_("admin_user_invalid_traffic_gb"))
+        return
+
+    try:
+        activation = await subscription_service.admin_grant_addon_topup(
+            session,
+            target_user_id,
+            traffic_gb,
+        )
+        if not activation:
+            await session.rollback()
+            await message.answer(_("admin_user_addon_topup_error"))
+            await state.clear()
+            return
+
+        await session.commit()
+        await message.answer(
+            _("admin_user_addon_topup_success", traffic_gb=f"{traffic_gb:g}", user_id=target_user_id)
+        )
+        user = await user_dal.get_user_by_id(session, target_user_id)
+        if user:
+            referral_service = ReferralService(settings, subscription_service, message.bot, i18n)
+            user_card_text = await format_user_card(user, session, subscription_service, i18n, current_lang, referral_service)
+            keyboard = get_user_card_keyboard(user.user_id, i18n, current_lang, user.referred_by_id)
+            await _send_with_profile_link_fallback(
+                message.answer,
+                text=user_card_text,
+                markup=keyboard.as_markup(),
+                user_id=user.user_id,
+                parse_mode="HTML",
+            )
+    except Exception as e:
+        logging.error("Error adding add-on traffic to user %s: %s", target_user_id, e, exc_info=True)
+        await session.rollback()
+        await message.answer(_("admin_user_addon_topup_error"))
     await state.clear()
 
 

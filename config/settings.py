@@ -157,6 +157,28 @@ class Settings(BaseSettings):
     STARS_PRICE_3_MONTHS: Optional[int] = Field(default=None)
     STARS_PRICE_6_MONTHS: Optional[int] = Field(default=None)
     STARS_PRICE_12_MONTHS: Optional[int] = Field(default=None)
+    ADDON_RUB_PRICE_1_MONTH: Optional[int] = Field(default=None)
+    ADDON_STARS_PRICE_1_MONTH: Optional[int] = Field(default=None)
+    ADDON_MONTHLY_TRAFFIC_GB: Optional[float] = Field(default=0.0)
+    ADDON_USER_SQUAD_UUIDS: Optional[str] = Field(
+        default=None,
+        description="Comma-separated UUIDs of internal squads to assign to add-on Remnawave users",
+    )
+    ADDON_USER_EXTERNAL_SQUAD_UUID: Optional[str] = Field(
+        default=None,
+        description="UUID of the external squad to assign to add-on Remnawave users (optional)",
+    )
+    ADDON_TRAFFIC_PACKAGES: Optional[str] = Field(
+        default=None,
+        description="Comma-separated add-on top-up packages in format '<GB>:<price>'",
+    )
+    ADDON_STARS_TRAFFIC_PACKAGES: Optional[str] = Field(
+        default=None,
+        description="Comma-separated add-on top-up packages in Stars in format '<GB>:<price>'",
+    )
+    ADDON_TRAFFIC_WARNING_PERCENT: int = Field(default=0)
+    ADDON_TRAFFIC_WARNING_GB: Optional[float] = Field(default=0.0)
+    ADDON_TRAFFIC_WORKER_INTERVAL_SECONDS: int = Field(default=300)
     PANEL_WEBHOOK_SECRET: Optional[str] = Field(default=None)
 
     TRAFFIC_PACKAGES: Optional[str] = Field(
@@ -295,6 +317,13 @@ class Settings(BaseSettings):
 
     @computed_field
     @property
+    def addon_monthly_traffic_bytes(self) -> int:
+        if self.ADDON_MONTHLY_TRAFFIC_GB is None or self.ADDON_MONTHLY_TRAFFIC_GB <= 0:
+            return 0
+        return int(self.ADDON_MONTHLY_TRAFFIC_GB * (1024**3))
+
+    @computed_field
+    @property
     def parsed_user_squad_uuids(self) -> Optional[List[str]]:
         if self.USER_SQUAD_UUIDS:
             return [
@@ -309,6 +338,26 @@ class Settings(BaseSettings):
     def parsed_user_external_squad_uuid(self) -> Optional[str]:
         if self.USER_EXTERNAL_SQUAD_UUID:
             cleaned = self.USER_EXTERNAL_SQUAD_UUID.strip()
+            if cleaned:
+                return cleaned
+        return None
+
+    @computed_field
+    @property
+    def parsed_addon_user_squad_uuids(self) -> Optional[List[str]]:
+        if self.ADDON_USER_SQUAD_UUIDS:
+            return [
+                uuid.strip()
+                for uuid in self.ADDON_USER_SQUAD_UUIDS.split(',')
+                if uuid.strip()
+            ]
+        return None
+
+    @computed_field
+    @property
+    def parsed_addon_user_external_squad_uuid(self) -> Optional[str]:
+        if self.ADDON_USER_EXTERNAL_SQUAD_UUID:
+            cleaned = self.ADDON_USER_EXTERNAL_SQUAD_UUID.strip()
             if cleaned:
                 return cleaned
         return None
@@ -502,6 +551,73 @@ class Settings(BaseSettings):
                 logging.warning("Invalid STARS_TRAFFIC_PACKAGES entry skipped: %s", chunk)
                 continue
         return packages
+
+    @computed_field
+    @property
+    def addon_subscription_options(self) -> Dict[int, float]:
+        options: Dict[int, float] = {}
+        if self.ADDON_RUB_PRICE_1_MONTH is not None:
+            options[1] = float(self.ADDON_RUB_PRICE_1_MONTH)
+        return options
+
+    @computed_field
+    @property
+    def addon_stars_subscription_options(self) -> Dict[int, int]:
+        options: Dict[int, int] = {}
+        if self.STARS_ENABLED and self.ADDON_STARS_PRICE_1_MONTH is not None:
+            options[1] = self.ADDON_STARS_PRICE_1_MONTH
+        return options
+
+    @computed_field
+    @property
+    def addon_traffic_packages(self) -> Dict[float, float]:
+        raw = (self.ADDON_TRAFFIC_PACKAGES or self.TRAFFIC_PACKAGES or "").strip()
+        packages: Dict[float, float] = {}
+        if not raw:
+            return packages
+        for part in raw.split(","):
+            chunk = part.strip()
+            if not chunk or ":" not in chunk:
+                continue
+            size_str, price_str = chunk.split(":", 1)
+            try:
+                size_gb = float(size_str.strip())
+                price_val = float(price_str.strip())
+                if size_gb > 0 and price_val >= 0:
+                    packages[size_gb] = price_val
+            except ValueError:
+                logging.warning("Invalid ADDON_TRAFFIC_PACKAGES entry skipped: %s", chunk)
+        return packages
+
+    @computed_field
+    @property
+    def addon_stars_traffic_packages(self) -> Dict[float, int]:
+        raw = (self.ADDON_STARS_TRAFFIC_PACKAGES or self.STARS_TRAFFIC_PACKAGES or "").strip()
+        packages: Dict[float, int] = {}
+        if not raw:
+            return packages
+        for part in raw.split(","):
+            chunk = part.strip()
+            if not chunk or ":" not in chunk:
+                continue
+            size_str, price_str = chunk.split(":", 1)
+            try:
+                size_gb = float(size_str.strip())
+                price_val = int(float(price_str.strip()))
+                if size_gb > 0 and price_val >= 0:
+                    packages[size_gb] = price_val
+            except ValueError:
+                logging.warning("Invalid ADDON_STARS_TRAFFIC_PACKAGES entry skipped: %s", chunk)
+        return packages
+
+    @computed_field
+    @property
+    def addon_enabled(self) -> bool:
+        return bool(
+            self.addon_subscription_options
+            and self.addon_monthly_traffic_bytes > 0
+            and self.parsed_addon_user_squad_uuids
+        )
 
     @computed_field
     @property

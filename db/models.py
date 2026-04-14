@@ -21,6 +21,7 @@ class User(Base):
                                server_default=func.now())
     is_banned = Column(Boolean, default=False)
     panel_user_uuid = Column(String, nullable=True, unique=True, index=True)
+    addon_panel_user_uuid = Column(String, nullable=True, unique=True, index=True)
     referral_code = Column(String(16), nullable=True, unique=True, index=True)
     referred_by_id = Column(BigInteger,
                             ForeignKey("users.user_id"),
@@ -67,6 +68,7 @@ class Subscription(Base):
                                      unique=True,
                                      index=True,
                                      nullable=True)
+    kind = Column(String, nullable=False, default="base", index=True)
     start_date = Column(DateTime(timezone=True), nullable=True)
     end_date = Column(DateTime(timezone=True), nullable=False, index=True)
     duration_months = Column(Integer, nullable=True)
@@ -78,8 +80,19 @@ class Subscription(Base):
     provider = Column(String, nullable=True)
     skip_notifications = Column(Boolean, default=False)
     auto_renew_enabled = Column(Boolean, default=True, index=True)
+    included_traffic_bytes = Column(BigInteger, nullable=True)
+    included_traffic_remaining_bytes = Column(BigInteger, nullable=True)
+    traffic_cycle_started_at = Column(DateTime(timezone=True), nullable=True)
+    traffic_cycle_ends_at = Column(DateTime(timezone=True), nullable=True)
+    traffic_warning_sent_at = Column(DateTime(timezone=True), nullable=True)
+    traffic_exhausted_sent_at = Column(DateTime(timezone=True), nullable=True)
 
     user = relationship("User", back_populates="subscriptions")
+    addon_traffic_topups = relationship(
+        "AddonTrafficTopUp",
+        back_populates="subscription",
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self):
         return f"<Subscription(id={self.subscription_id}, user_id={self.user_id}, panel_uuid='{self.panel_user_uuid}', ends='{self.end_date}')>"
@@ -99,6 +112,7 @@ class Payment(Base):
                                  nullable=True)
     provider_payment_id = Column(String, unique=True, nullable=True)
     provider = Column(String, nullable=False, default="yookassa", index=True)
+    kind = Column(String, nullable=False, default="base_subscription", index=True)
     idempotence_key = Column(String, unique=True, nullable=True)
     amount = Column(Float, nullable=False)  # Final amount paid (after discount if any)
 
@@ -176,6 +190,9 @@ class PromoCode(Base):
     created_by_admin_id = Column(BigInteger, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     valid_until = Column(DateTime(timezone=True), nullable=True)
+    applies_to_base_subscription = Column(Boolean, nullable=False, default=True)
+    applies_to_addon_subscription = Column(Boolean, nullable=False, default=False)
+    applies_to_addon_traffic_topup = Column(Boolean, nullable=False, default=False)
 
     activations = relationship("PromoCodeActivation",
                                back_populates="promo_code",
@@ -221,11 +238,42 @@ class ActiveDiscount(Base):
         nullable=False,
     )
     discount_percentage = Column(Integer, nullable=False)
+    payment_kind = Column(String, nullable=False, default="base_subscription")
     activated_at = Column(DateTime(timezone=True), server_default=func.now())
     expires_at = Column(DateTime(timezone=True), nullable=False)
 
     promo_code = relationship("PromoCode")
     user = relationship("User")
+
+
+class AddonTrafficTopUp(Base):
+    __tablename__ = "addon_traffic_topups"
+
+    topup_id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(BigInteger, ForeignKey("users.user_id"), nullable=False, index=True)
+    subscription_id = Column(
+        Integer,
+        ForeignKey("subscriptions.subscription_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    payment_id = Column(
+        Integer,
+        ForeignKey("payments.payment_id"),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    total_bytes = Column(BigInteger, nullable=False)
+    remaining_bytes = Column(BigInteger, nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    status = Column(String, nullable=False, default="active", index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+
+    user = relationship("User")
+    subscription = relationship("Subscription", back_populates="addon_traffic_topups")
+    payment = relationship("Payment")
 
 
 class MessageLog(Base):

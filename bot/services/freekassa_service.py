@@ -18,6 +18,12 @@ from bot.services.subscription_service import SubscriptionService
 from bot.services.referral_service import ReferralService
 from bot.keyboards.inline.user_keyboards import get_connect_and_main_keyboard
 from bot.services.notification_service import NotificationService
+from bot.utils.product_offers import (
+    is_traffic_payment_kind,
+    normalize_payment_kind,
+    resolve_base_price,
+)
+from bot.utils.product_kinds import PAYMENT_KIND_ADDON_SUBSCRIPTION, PAYMENT_KIND_BASE_SUBSCRIPTION
 from db.dal import payment_dal, user_dal
 from bot.utils.text_sanitizer import sanitize_display_name, username_for_display
 from bot.utils.config_link import prepare_config_links
@@ -78,12 +84,14 @@ class FreeKassaService:
         ip_address: Optional[str] = None,
         payment_method_id: Optional[int] = None,
         extra_params: Optional[Dict[str, Any]] = None,
+        payment_kind: str = "base_subscription",
         promo_code_service=None,
         session=None,
     ) -> Tuple[bool, Dict[str, Any]]:
         if not self.configured:
             logging.error("FreeKassaService is not configured. Cannot create order.")
             return False, {"message": "service_not_configured"}
+        payment_kind = normalize_payment_kind(payment_kind)
 
         # Check for active discount to save metadata (price already discounted from previous step)
         original_amount = None
@@ -92,20 +100,18 @@ class FreeKassaService:
 
         if promo_code_service and session:
             from db.dal import active_discount_dal
-            active_discount = await active_discount_dal.get_active_discount(session, user_id)
+            active_discount = await active_discount_dal.get_active_discount(
+                session,
+                user_id,
+                payment_kind=payment_kind,
+            )
             if active_discount:
                 # Price is already discounted, calculate original price backwards
                 discount_pct = active_discount.discount_percentage
                 promo_code_id = active_discount.promo_code_id
                 denominator = 1 - discount_pct / 100
                 if denominator <= 0:
-                    traffic_mode = bool(getattr(self.settings, "traffic_sale_mode", False))
-                    price_source = (
-                        getattr(self.settings, "traffic_packages", {}) or {}
-                        if traffic_mode
-                        else (self.settings.subscription_options or {})
-                    )
-                    fallback_original = price_source.get(months)
+                    fallback_original = resolve_base_price(self.settings, months, payment_kind, stars=False)
                     if fallback_original is not None:
                         original_amount = fallback_original
                         discount_amount = original_amount - amount
@@ -365,18 +371,19 @@ class FreeKassaService:
                     return web.Response(text="YES")
 
                 months = payment.subscription_duration_months or 1
-                sale_mode = "traffic" if self.settings.traffic_sale_mode else "subscription"
+                sale_mode = normalize_payment_kind(payment.kind or "base_subscription")
 
                 activation = await self.subscription_service.activate_subscription(
                     session,
                     payment.user_id,
-                    int(months) if sale_mode != "traffic" else 0,
+                    int(months) if not is_traffic_payment_kind(sale_mode) else 0,
                     float(payment.amount),
                     payment.payment_id,
                     promo_code_id_from_payment=payment.promo_code_id,
                     provider="freekassa",
                     sale_mode=sale_mode,
-                    traffic_gb=months if sale_mode == "traffic" else None,
+                    traffic_gb=months if is_traffic_payment_kind(sale_mode) else None,
+                    payment_kind=sale_mode,
                 )
                 if not activation or not activation.get("end_date"):
                     raise RuntimeError(
@@ -384,7 +391,7 @@ class FreeKassaService:
                     )
 
                 referral_bonus = None
-                if sale_mode != "traffic":
+                if sale_mode == PAYMENT_KIND_BASE_SUBSCRIPTION:
                     referral_bonus = await self.referral_service.apply_referral_bonuses_for_payment(
                         session,
                         payment.user_id,
@@ -408,7 +415,7 @@ class FreeKassaService:
             config_link_text = config_link_display or _("config_link_not_available")
             final_end = activation.get("end_date") if activation else None
             months = payment.subscription_duration_months or 1
-            sale_mode = "traffic" if self.settings.traffic_sale_mode else "subscription"
+            sale_mode = normalize_payment_kind(payment.kind or "base_subscription")
 
             applied_days = 0
             if referral_bonus and referral_bonus.get("referee_new_end_date"):
@@ -425,10 +432,14 @@ class FreeKassaService:
 
             traffic_label = str(int(months)) if float(months).is_integer() else f"{months:g}"
 
-            if sale_mode == "traffic":
-                text = _("payment_successful_traffic_full",
+            if is_traffic_payment_kind(sale_mode):
+                text = _("payment_successful_addon_traffic_full",
                          traffic_gb=traffic_label,
                          end_date=end_date_str if final_end else "",
+                         config_link=config_link_text)
+            elif sale_mode == PAYMENT_KIND_ADDON_SUBSCRIPTION:
+                text = _("payment_successful_addon_full",
+                         end_date=end_date_str,
                          config_link=config_link_text)
             elif applied_days:
                 inviter_name_display = _("friend_placeholder")
@@ -489,8 +500,8 @@ class FreeKassaService:
                     user_id=payment.user_id,
                     amount=float(payment.amount),
                     currency=self.default_currency,
-                    months=int(months) if sale_mode != "traffic" else 0,
-                    traffic_gb=months if sale_mode == "traffic" else None,
+                    months=int(months) if not is_traffic_payment_kind(sale_mode) else 0,
+                    traffic_gb=months if is_traffic_payment_kind(sale_mode) else None,
                     payment_provider="freekassa",
                     username=db_user.username if db_user else None,
                 )

@@ -8,6 +8,15 @@ from datetime import datetime, timezone
 from db.models import PromoCode, PromoCodeActivation, User, Payment
 
 
+def _applicability_column_for_payment_kind(payment_kind: Optional[str]):
+    normalized = (payment_kind or "base_subscription").strip().lower()
+    if normalized == "addon_subscription":
+        return PromoCode.applies_to_addon_subscription
+    if normalized == "addon_traffic_topup":
+        return PromoCode.applies_to_addon_traffic_topup
+    return PromoCode.applies_to_base_subscription
+
+
 async def create_promo_code(session: AsyncSession,
                             promo_data: Dict[str, Any]) -> PromoCode:
     new_promo = PromoCode(**promo_data)
@@ -44,11 +53,14 @@ async def get_active_promo_code_by_code_str(
 
 
 async def get_active_bonus_promo_code_by_code_str(
-        session: AsyncSession, code_str: str) -> Optional[PromoCode]:
+        session: AsyncSession, code_str: str,
+        payment_kind: str = "base_subscription") -> Optional[PromoCode]:
     """Get active bonus_days-type promo code by code string"""
+    applicability_column = _applicability_column_for_payment_kind(payment_kind)
     stmt = select(PromoCode).where(
         PromoCode.code == code_str.upper(),
         PromoCode.promo_type == "bonus_days",
+        applicability_column == True,
         PromoCode.is_active == True,
         PromoCode.current_activations < PromoCode.max_activations,
         or_(PromoCode.valid_until == None, PromoCode.valid_until
@@ -58,11 +70,14 @@ async def get_active_bonus_promo_code_by_code_str(
 
 
 async def get_active_discount_promo_code_by_code_str(
-        session: AsyncSession, code_str: str) -> Optional[PromoCode]:
+        session: AsyncSession, code_str: str,
+        payment_kind: str = "base_subscription") -> Optional[PromoCode]:
     """Get active discount-type promo code by code string"""
+    applicability_column = _applicability_column_for_payment_kind(payment_kind)
     stmt = select(PromoCode).where(
         PromoCode.code == code_str.upper(),
         PromoCode.promo_type == "discount",
+        applicability_column == True,
         PromoCode.is_active == True,
         PromoCode.current_activations < PromoCode.max_activations,
         or_(PromoCode.valid_until == None, PromoCode.valid_until
@@ -73,12 +88,15 @@ async def get_active_discount_promo_code_by_code_str(
 
 async def get_all_active_promo_codes(session: AsyncSession,
                                      limit: int = 20,
-                                     offset: int = 0) -> List[PromoCode]:
+                                     offset: int = 0,
+                                     payment_kind: Optional[str] = None) -> List[PromoCode]:
     stmt = (select(PromoCode).where(
         PromoCode.is_active == True,
         or_(PromoCode.valid_until == None, PromoCode.valid_until
             > datetime.now(timezone.utc))).order_by(
                 PromoCode.created_at.desc()).limit(limit).offset(offset))
+    if payment_kind:
+        stmt = stmt.where(_applicability_column_for_payment_kind(payment_kind) == True)
     result = await session.execute(stmt)
     return result.scalars().all()
 

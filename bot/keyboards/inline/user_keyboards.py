@@ -132,6 +132,68 @@ def get_subscription_options_keyboard(subscription_options: Dict[
     return builder.as_markup()
 
 
+def get_product_catalog_keyboard(
+    *,
+    base_options: Dict[float, Tuple[float, str]],
+    addon_option: Optional[Tuple[float, str]],
+    addon_topups: Dict[float, Tuple[float, str]],
+    lang: str,
+    i18n_instance,
+) -> InlineKeyboardMarkup:
+    _ = lambda key, **kwargs: i18n_instance.gettext(lang, key, **kwargs)
+    builder = InlineKeyboardBuilder()
+
+    def _format_value(val: float) -> str:
+        return str(int(val)) if float(val).is_integer() else f"{val:g}"
+
+    for months, (price, currency_symbol) in base_options.items():
+        builder.row(
+            InlineKeyboardButton(
+                text=_(
+                    "subscribe_for_months_button",
+                    months=int(months) if float(months).is_integer() else months,
+                    price=price,
+                    currency_symbol=currency_symbol,
+                ),
+                callback_data=f"subscribe_period:{_format_value(months)}",
+            )
+        )
+
+    if addon_option is not None:
+        addon_price, addon_currency = addon_option
+        builder.row(
+            InlineKeyboardButton(
+                text=_(
+                    "buy_addon_month_button",
+                    price=addon_price,
+                    currency_symbol=addon_currency,
+                ),
+                callback_data="subscribe_addon_period:1",
+            )
+        )
+
+    for traffic_gb, (price, currency_symbol) in addon_topups.items():
+        builder.row(
+            InlineKeyboardButton(
+                text=_(
+                    "buy_addon_traffic_package_button",
+                    traffic_gb=_format_value(traffic_gb),
+                    price=price,
+                    currency_symbol=currency_symbol,
+                ),
+                callback_data=f"subscribe_addon_traffic:{_format_value(traffic_gb)}",
+            )
+        )
+
+    builder.row(
+        InlineKeyboardButton(
+            text=_(key="back_to_main_menu_button"),
+            callback_data="main_action:back_to_main",
+        )
+    )
+    return builder.as_markup()
+
+
 def get_payment_method_keyboard(months: int, price: float,
                                 stars_price: Optional[int],
                                 currency_symbol_val: str, lang: str,

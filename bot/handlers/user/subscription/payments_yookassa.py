@@ -11,6 +11,13 @@ from bot.keyboards.inline.user_keyboards import (
     get_yk_saved_cards_keyboard,
 )
 from bot.middlewares.i18n import JsonI18n
+from bot.utils.product_offers import (
+    get_payment_description,
+    get_payment_link_message_key,
+    is_traffic_payment_kind,
+    normalize_payment_kind,
+    resolve_base_price,
+)
 from bot.services.yookassa_service import YooKassaService
 from config.settings import Settings
 from db.dal import payment_dal, user_billing_dal, active_discount_dal
@@ -29,10 +36,20 @@ def _parse_offer_payload(payload: str) -> Optional[Tuple[float, float, str]]:
         parts = payload.split(":")
         value = float(parts[0])
         price = float(parts[1])
-        sale_mode = parts[2] if len(parts) > 2 else "subscription"
-        return value, price, sale_mode
+        payment_kind = normalize_payment_kind(parts[2] if len(parts) > 2 else "base_subscription")
+        return value, price, payment_kind
     except (ValueError, IndexError):
         return None
+
+
+def _get_back_offer_callback(value: float, payment_kind: str) -> str:
+    value_str = _format_value(value)
+    payment_kind = normalize_payment_kind(payment_kind)
+    if payment_kind == "addon_subscription":
+        return f"subscribe_addon_period:{value_str}"
+    if payment_kind == "addon_traffic_topup":
+        return f"subscribe_addon_traffic:{value_str}"
+    return f"subscribe_period:{value_str}"
 
 
 def _format_saved_payment_method_title(get_text, network: Optional[str], last4: Optional[str], is_default: bool) -> str:
@@ -74,7 +91,7 @@ async def _initiate_yk_payment(
     back_callback: str,
     payment_method_id: Optional[str] = None,
     selected_method_internal_id: Optional[int] = None,
-    sale_mode: str = "subscription",
+    sale_mode: str = "base_subscription",
 ) -> bool:
     """Create payment record and initiate YooKassa payment (new card or saved card)."""
     if not callback.message:
@@ -86,19 +103,18 @@ async def _initiate_yk_payment(
     active_promo_code_id = None
 
     if promo_code_service:
-        active_discount = await active_discount_dal.get_active_discount(session, user_id)
+        active_discount = await active_discount_dal.get_active_discount(
+            session,
+            user_id,
+            payment_kind=sale_mode,
+        )
         if active_discount:
             # Price is already discounted, calculate original price backwards
             discount_pct = active_discount.discount_percentage
             active_promo_code_id = active_discount.promo_code_id
             denominator = 1 - discount_pct / 100
             if denominator <= 0:
-                price_source = (
-                    getattr(settings, "traffic_packages", {}) or {}
-                    if sale_mode == "traffic"
-                    else (settings.subscription_options or {})
-                )
-                fallback_original = price_source.get(months)
+                fallback_original = resolve_base_price(settings, months, sale_mode, stars=False)
                 if fallback_original is not None:
                     original_price = fallback_original
                     discount_amount = original_price - price_rub
@@ -120,11 +136,7 @@ async def _initiate_yk_payment(
                     f"original {original_price:.2f} -> final {price_rub}"
                 )
 
-    payment_description = (
-        get_text("payment_description_traffic", traffic_gb=_format_value(months))
-        if sale_mode == "traffic"
-        else get_text("payment_description_subscription", months=int(months))
-    )
+    payment_description = get_payment_description(get_text, months, sale_mode)
     payment_record_data = {
         "user_id": user_id,
         "amount": price_rub,  # Discounted amount
@@ -135,6 +147,8 @@ async def _initiate_yk_payment(
         "description": payment_description,
         "subscription_duration_months": int(months),
         "promo_code_id": active_promo_code_id,  # NEW: Link to promo code
+        "provider": "yookassa",
+        "kind": sale_mode,
     }
 
     db_payment_record = None
@@ -167,9 +181,9 @@ async def _initiate_yk_payment(
         "user_id": str(user_id),
         "subscription_months": str(months),
         "payment_db_id": str(db_payment_record.payment_id),
-        "sale_mode": sale_mode,
+        "payment_kind": sale_mode,
     }
-    if sale_mode == "traffic":
+    if is_traffic_payment_kind(sale_mode):
         yookassa_metadata["traffic_gb"] = str(months)
     if payment_method_id:
         yookassa_metadata["used_saved_payment_method_id"] = payment_method_id
@@ -260,7 +274,7 @@ async def _initiate_yk_payment(
         try:
             await callback.message.edit_text(
                 get_text(
-                    key="payment_link_message_traffic" if sale_mode == "traffic" else "payment_link_message",
+                    key=get_payment_link_message_key(sale_mode),
                     months=int(months),
                     traffic_gb=_format_value(months),
                 ),
@@ -280,7 +294,7 @@ async def _initiate_yk_payment(
             try:
                 await callback.message.answer(
                     get_text(
-                        key="payment_link_message_traffic" if sale_mode == "traffic" else "payment_link_message",
+                        key=get_payment_link_message_key(sale_mode),
                         months=int(months),
                         traffic_gb=_format_value(months),
                     ),
@@ -413,8 +427,8 @@ async def pay_yk_callback_handler(callback: types.CallbackQuery, settings: Setti
         session=session,
         settings=settings,
         user_id=user_id,
-        months=months,
-        sale_mode=sale_mode,
+        value=months,
+        payment_kind=sale_mode,
         promo_code_service=promo_code_service,
     )
     if resolved_price_rub is None:
@@ -447,7 +461,7 @@ async def pay_yk_callback_handler(callback: types.CallbackQuery, settings: Setti
 
     price_rub = resolved_price_rub
     currency_code_for_yk = "RUB"
-    autopay_enabled = bool(settings.yookassa_autopayments_active and sale_mode != "traffic" and not settings.traffic_sale_mode)
+    autopay_enabled = bool(settings.yookassa_autopayments_active and sale_mode == "base_subscription")
     autopay_require_binding = bool(
         getattr(settings, 'YOOKASSA_AUTOPAYMENTS_REQUIRE_CARD_BINDING', True)
     )
@@ -510,7 +524,7 @@ async def pay_yk_callback_handler(callback: types.CallbackQuery, settings: Setti
         price_rub=price_rub,
         currency_code_for_yk=currency_code_for_yk,
         save_payment_method=autopay_enabled and autopay_require_binding,
-        back_callback=f"subscribe_period:{_format_value(months)}",
+        back_callback=_get_back_offer_callback(months, sale_mode),
         sale_mode=sale_mode,
     )
     try:
@@ -569,8 +583,8 @@ async def pay_yk_new_card_handler(callback: types.CallbackQuery, settings: Setti
         session=session,
         settings=settings,
         user_id=user_id,
-        months=months,
-        sale_mode=sale_mode,
+        value=months,
+        payment_kind=sale_mode,
         promo_code_service=promo_code_service,
     )
     if resolved_price_rub is None:
@@ -603,7 +617,7 @@ async def pay_yk_new_card_handler(callback: types.CallbackQuery, settings: Setti
 
     price_rub = resolved_price_rub
     currency_code_for_yk = "RUB"
-    autopay_enabled = bool(settings.yookassa_autopayments_active and sale_mode != "traffic" and not settings.traffic_sale_mode)
+    autopay_enabled = bool(settings.yookassa_autopayments_active and sale_mode == "base_subscription")
     autopay_require_binding = bool(
         getattr(settings, 'YOOKASSA_AUTOPAYMENTS_REQUIRE_CARD_BINDING', True)
     )
@@ -622,7 +636,7 @@ async def pay_yk_new_card_handler(callback: types.CallbackQuery, settings: Setti
         price_rub=price_rub,
         currency_code_for_yk=currency_code_for_yk,
         save_payment_method=autopay_enabled and autopay_require_binding,
-        back_callback=f"subscribe_period:{_format_value(months)}",
+        back_callback=_get_back_offer_callback(months, sale_mode),
         sale_mode=sale_mode,
     )
     try:
@@ -667,7 +681,7 @@ async def pay_yk_saved_list_handler(callback: types.CallbackQuery, settings: Set
         months = float(parts[0])
         callback_price_rub = float(parts[1])
         page = int(parts[2]) if len(parts) > 2 else 0
-        sale_mode = parts[3] if len(parts) > 3 else "subscription"
+        sale_mode = normalize_payment_kind(parts[3] if len(parts) > 3 else "base_subscription")
     except (ValueError, IndexError):
         logging.error(f"pay_yk_saved_list payload parsing error: {callback.data}")
         try:
@@ -676,7 +690,7 @@ async def pay_yk_saved_list_handler(callback: types.CallbackQuery, settings: Set
             logging.debug("Suppressed exception in bot/handlers/user/subscription/payments_yookassa.py: %s", exc)
         return
 
-    autopay_enabled = bool(settings.yookassa_autopayments_active and sale_mode != "traffic" and not settings.traffic_sale_mode)
+    autopay_enabled = bool(settings.yookassa_autopayments_active and sale_mode == "base_subscription")
     if not autopay_enabled:
         try:
             await callback.answer(get_text("error_try_again"), show_alert=True)
@@ -859,7 +873,7 @@ async def pay_yk_use_saved_handler(callback: types.CallbackQuery, settings: Sett
     try:
         months = float(parts[0])
         callback_price_rub = float(parts[1])
-        sale_mode = parts[3] if len(parts) > 3 else "subscription"
+        sale_mode = normalize_payment_kind(parts[3] if len(parts) > 3 else "base_subscription")
     except (ValueError, IndexError):
         logging.error(f"pay_yk_use_saved months/price parsing error: {callback.data}")
         try:
@@ -868,7 +882,7 @@ async def pay_yk_use_saved_handler(callback: types.CallbackQuery, settings: Sett
             logging.debug("Suppressed exception in bot/handlers/user/subscription/payments_yookassa.py: %s", exc)
         return
 
-    autopay_enabled = bool(settings.yookassa_autopayments_active and sale_mode != "traffic" and not settings.traffic_sale_mode)
+    autopay_enabled = bool(settings.yookassa_autopayments_active and sale_mode == "base_subscription")
     if not autopay_enabled:
         try:
             await callback.answer(get_text("error_try_again"), show_alert=True)

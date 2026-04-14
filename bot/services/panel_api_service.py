@@ -491,6 +491,26 @@ class PanelApiService:
         )
         return False
 
+    async def reset_user_traffic(
+            self,
+            user_uuid: str,
+            log_response: bool = True) -> bool:
+        endpoint = f"/users/{user_uuid}/actions/reset-traffic"
+        response_data = await self._request(
+            "POST",
+            endpoint,
+            log_full_response=log_response,
+        )
+        if response_data and not response_data.get("error"):
+            logging.info("User %s traffic reset on panel.", user_uuid)
+            return True
+        logging.error(
+            "Failed to reset traffic for user %s on panel. Response: %s",
+            user_uuid,
+            response_data if not log_response else "(logged above)",
+        )
+        return False
+
     async def delete_user_from_panel(self,
                                      user_uuid: str,
                                      log_response: bool = True) -> bool:

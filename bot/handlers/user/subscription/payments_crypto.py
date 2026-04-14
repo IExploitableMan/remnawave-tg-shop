@@ -4,6 +4,11 @@ from typing import Optional
 from aiogram import F, Router, types
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot.utils.product_offers import (
+    get_payment_description,
+    get_payment_link_message_key,
+    normalize_payment_kind,
+)
 from bot.keyboards.inline.user_keyboards import get_payment_url_keyboard
 from bot.middlewares.i18n import JsonI18n
 from bot.services.crypto_pay_service import CryptoPayService
@@ -13,6 +18,16 @@ router = Router(name="user_subscription_payments_crypto_router")
 
 
 from bot.handlers.user.subscription.payments_subscription import resolve_fiat_offer_price_for_user
+
+
+def _get_back_offer_callback(value: float, payment_kind: str) -> str:
+    value_str = str(int(value)) if float(value).is_integer() else f"{value:g}"
+    payment_kind = normalize_payment_kind(payment_kind)
+    if payment_kind == "addon_subscription":
+        return f"subscribe_addon_period:{value_str}"
+    if payment_kind == "addon_traffic_topup":
+        return f"subscribe_addon_traffic:{value_str}"
+    return f"subscribe_period:{value_str}"
 
 @router.callback_query(F.data.startswith("pay_crypto:"))
 async def pay_crypto_callback_handler(
@@ -46,7 +61,7 @@ async def pay_crypto_callback_handler(
         parts = data_payload.split(":")
         months = float(parts[0])
         callback_price_amount = float(parts[1])
-        sale_mode = parts[2] if len(parts) > 2 else "subscription"
+        sale_mode = normalize_payment_kind(parts[2] if len(parts) > 2 else "base_subscription")
     except (ValueError, IndexError):
         try:
             await callback.answer(get_text("error_try_again"), show_alert=True)
@@ -59,8 +74,8 @@ async def pay_crypto_callback_handler(
         session=session,
         settings=settings,
         user_id=user_id,
-        months=months,
-        sale_mode=sale_mode,
+        value=months,
+        payment_kind=sale_mode,
         promo_code_service=promo_code_service,
     )
     if resolved_price_amount is None:
@@ -93,11 +108,7 @@ async def pay_crypto_callback_handler(
 
     price_amount = resolved_price_amount
     human_value = str(int(months)) if float(months).is_integer() else f"{months:g}"
-    payment_description = (
-        get_text("payment_description_traffic", traffic_gb=human_value)
-        if sale_mode == "traffic"
-        else get_text("payment_description_subscription", months=int(months))
-    )
+    payment_description = get_payment_description(get_text, months, sale_mode)
 
     invoice_url = await cryptopay_service.create_invoice(
         session=session,
@@ -113,7 +124,7 @@ async def pay_crypto_callback_handler(
         try:
             await callback.message.edit_text(
                 get_text(
-                    key="payment_link_message_traffic" if sale_mode == "traffic" else "payment_link_message",
+                    key=get_payment_link_message_key(sale_mode),
                     months=int(months),
                     traffic_gb=human_value,
                 ),
@@ -121,7 +132,7 @@ async def pay_crypto_callback_handler(
                     invoice_url,
                     current_lang,
                     i18n,
-                    back_callback=f"subscribe_period:{human_value}",
+                    back_callback=_get_back_offer_callback(months, sale_mode),
                     back_text_key="back_to_payment_methods_button",
                 ),
                 disable_web_page_preview=False,
@@ -130,7 +141,7 @@ async def pay_crypto_callback_handler(
             try:
                 await callback.message.answer(
                     get_text(
-                        key="payment_link_message_traffic" if sale_mode == "traffic" else "payment_link_message",
+                        key=get_payment_link_message_key(sale_mode),
                         months=int(months),
                         traffic_gb=human_value,
                     ),
@@ -138,7 +149,7 @@ async def pay_crypto_callback_handler(
                         invoice_url,
                         current_lang,
                         i18n,
-                        back_callback=f"subscribe_period:{human_value}",
+                        back_callback=_get_back_offer_callback(months, sale_mode),
                         back_text_key="back_to_payment_methods_button",
                     ),
                     disable_web_page_preview=False,

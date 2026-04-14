@@ -7,6 +7,12 @@ from aiogram.types import LabeledPrice
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import Settings
+from bot.utils.product_offers import (
+    get_payment_description,
+    is_traffic_payment_kind,
+    normalize_payment_kind,
+    resolve_base_price,
+)
 from db.dal import payment_dal, user_dal
 from .subscription_service import SubscriptionService
 from .referral_service import ReferralService
@@ -28,36 +34,12 @@ class StarsService:
         self.referral_service = referral_service
 
     def _resolve_base_stars_price(self, months: float, sale_mode: str) -> Optional[int]:
-        stars_price_source = (
-            self.settings.stars_traffic_packages
-            if sale_mode == "traffic"
-            else self.settings.stars_subscription_options
-        )
-
-        if sale_mode != "traffic":
-            months_key = int(months) if float(months).is_integer() else months
-            base_price = stars_price_source.get(months_key)
-            if base_price is not None:
-                return base_price
-
-            if float(months).is_integer():
-                return stars_price_source.get(float(months_key))
-
-            return None
-
-        base_price = stars_price_source.get(months)
-        if base_price is not None:
-            return base_price
-
-        for package_size, package_price in stars_price_source.items():
-            if math.isclose(float(package_size), float(months), rel_tol=0.0, abs_tol=1e-9):
-                return package_price
-
-        return None
+        return resolve_base_price(self.settings, months, normalize_payment_kind(sale_mode), stars=True)
 
     async def create_invoice(self, session: AsyncSession, user_id: int, months: float,
-                             stars_price: int, description: str, sale_mode: str = "subscription",
+                             stars_price: int, description: str, sale_mode: str = "base_subscription",
                              promo_code_service=None) -> Optional[int]:
+        sale_mode = normalize_payment_kind(sale_mode)
         # Always resolve base price server-side and reject unknown packages.
         resolved_base_price = self._resolve_base_stars_price(months, sale_mode)
         if resolved_base_price is None:
@@ -92,7 +74,7 @@ class StarsService:
 
             # Apply discount and round up using ceiling
             final_price_float, discount_float, promo_code_id = await apply_discount_to_payment(
-                session, user_id, float(original_stars_price), promo_code_service
+                session, user_id, float(original_stars_price), promo_code_service, payment_kind=sale_mode
             )
             if discount_float:
                 stars_price = math.ceil(final_price_float)
@@ -115,6 +97,7 @@ class StarsService:
             "subscription_duration_months": int(months),
             "provider": "telegram_stars",
             "promo_code_id": promo_code_id,
+            "kind": sale_mode,
         }
         try:
             db_payment_record = await payment_dal.create_payment_record(
@@ -150,7 +133,8 @@ class StarsService:
                                          months: int,
                                          stars_amount: int,
                                          i18n_data: dict,
-                                         sale_mode: str = "subscription") -> None:
+                                         sale_mode: str = "base_subscription") -> None:
+        sale_mode = normalize_payment_kind(sale_mode)
         # Fetch payment record to get promo_code_id
         payment_record = await payment_dal.get_payment_by_db_id(session, payment_db_id)
         promo_code_id_from_payment = payment_record.promo_code_id if payment_record else None
@@ -177,20 +161,21 @@ class StarsService:
             activation_details = await self.subscription_service.activate_subscription(
                 session,
                 message.from_user.id,
-                int(months) if sale_mode != "traffic" else 0,
+                int(months) if not is_traffic_payment_kind(sale_mode) else 0,
                 float(stars_amount),
                 payment_db_id,
                 promo_code_id_from_payment=promo_code_id_from_payment,
                 provider="telegram_stars",
                 sale_mode=sale_mode,
-                traffic_gb=months if sale_mode == "traffic" else None,
+                traffic_gb=months if is_traffic_payment_kind(sale_mode) else None,
+                payment_kind=sale_mode,
             )
             if not activation_details or not activation_details.get("end_date"):
                 raise RuntimeError(
                     f"Failed to activate subscription after stars payment {payment_db_id}"
                 )
 
-            if sale_mode != "traffic":
+            if sale_mode == "base_subscription":
                 referral_bonus = await self.referral_service.apply_referral_bonuses_for_payment(
                     session,
                     message.from_user.id,
@@ -221,13 +206,24 @@ class StarsService:
         config_link_display, connect_button_url = await prepare_config_links(self.settings, raw_config_link)
         config_link_text = config_link_display or _("config_link_not_available")
 
-        if sale_mode == "traffic":
+        if is_traffic_payment_kind(sale_mode):
             success_msg = _(
-                "payment_successful_traffic_full",
+                "payment_successful_addon_traffic_full",
                 traffic_gb=str(int(months)) if float(months).is_integer() else f"{months:g}",
                 end_date=final_end.strftime('%Y-%m-%d'),
                 config_link=config_link_text,
             )
+        elif sale_mode == "addon_subscription":
+            success_msg = _(
+                "payment_successful_addon_full",
+                end_date=final_end.strftime('%Y-%m-%d'),
+                config_link=config_link_text,
+            )
+            if activation_details.get("warning_base_ends_before_addon"):
+                success_msg += "\n\n" + _(
+                    "addon_purchase_base_shorter_warning",
+                    base_end_date=activation_details["base_end_date"].strftime('%Y-%m-%d') if activation_details.get("base_end_date") else "—",
+                )
         elif applied_days:
             inviter_name_display = _("friend_placeholder")
             db_user = await user_dal.get_user_by_id(session, message.from_user.id)
@@ -283,10 +279,10 @@ class StarsService:
                 user_id=message.from_user.id,
                 amount=float(stars_amount),
                 currency="XTR",
-                months=int(months) if sale_mode != "traffic" else 0,
+                months=int(months) if sale_mode == "base_subscription" else 0,
                 payment_provider="stars",
                 username=user.username if user else None,
-                traffic_gb=months if sale_mode == "traffic" else None,
+                traffic_gb=months if is_traffic_payment_kind(sale_mode) else None,
             )
         except Exception as e:
             logging.error(f"Failed to send stars payment notification: {e}")

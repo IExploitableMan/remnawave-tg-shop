@@ -44,19 +44,47 @@ class PanelWebhookService:
             logging.error(f"Failed to send notification to {user_id}: {e}")
 
     async def handle_event(self, event_name: str, user_payload: dict):
-        telegram_id = user_payload.get("telegramId")
-        if not telegram_id:
-            logging.warning("Panel webhook without telegramId received")
+        async with self.async_session_factory() as session:
+            panel_uuid = None
+            if isinstance(user_payload, dict):
+                panel_uuid = user_payload.get("uuid") or user_payload.get("userUuid")
+
+            db_user = None
+            if panel_uuid:
+                db_user = await user_dal.get_user_by_any_panel_uuid(session, panel_uuid)
+
+            if not db_user:
+                telegram_id = user_payload.get("telegramId")
+                if not telegram_id:
+                    logging.warning("Panel webhook without resolvable user received (uuid=%s)", panel_uuid)
+                    return
+                db_user = await user_dal.get_user_by_id(session, int(telegram_id))
+
+            if not db_user:
+                logging.warning("Panel webhook user not found locally (uuid=%s)", panel_uuid)
+                return
+
+            user_id = db_user.user_id
+            lang = db_user.language_code if db_user and db_user.language_code else self.settings.DEFAULT_LANGUAGE
+            first_name = db_user.first_name or f"User {user_id}" if db_user else f"User {user_id}"
+            is_addon_profile = bool(panel_uuid and db_user.addon_panel_user_uuid == panel_uuid)
+
+            if event_name in {"user.expired", "user.expired_24_hours_ago"}:
+                try:
+                    subscription_service = getattr(self, "subscription_service", None)
+                    if subscription_service and not is_addon_profile:
+                        await subscription_service._restore_addon_if_possible(session, user_id)  # type: ignore[attr-defined]
+                        await session.commit()
+                except Exception:
+                    await session.rollback()
+                    logging.exception("Failed to refresh add-on runtime state after panel expiration event")
+
+        if is_addon_profile:
+            logging.info("Panel webhook event %s received for addon profile of user %s", event_name, user_id)
             return
-        user_id = int(telegram_id)
 
         if not self.settings.SUBSCRIPTION_NOTIFICATIONS_ENABLED:
             return
-
-        async with self.async_session_factory() as session:
-            db_user = await user_dal.get_user_by_id(session, user_id)
-            lang = db_user.language_code if db_user and db_user.language_code else self.settings.DEFAULT_LANGUAGE
-            first_name = db_user.first_name or f"User {user_id}" if db_user else f"User {user_id}"
 
         markup = get_subscribe_only_markup(lang, self.i18n)
 
@@ -161,14 +189,16 @@ class PanelWebhookService:
             user_data = user_data.get("user") or user_data
 
         telegram_id = user_data.get("telegramId") if isinstance(user_data, dict) else None
+        panel_uuid = user_data.get("uuid") if isinstance(user_data, dict) else None
 
         if not event_name:
             return web.Response(status=200, text="ok_no_event")
 
         logging.info(
-            "Panel webhook event received: %s; telegramId=%s",
+            "Panel webhook event received: %s; telegramId=%s; uuid=%s",
             event_name,
             telegram_id if telegram_id is not None else "N/A",
+            panel_uuid if panel_uuid is not None else "N/A",
         )
 
         await self.handle_event(event_name, user_data)

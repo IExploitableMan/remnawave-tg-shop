@@ -207,6 +207,7 @@ class PromoCodeService:
         user_id: int,
         code_input: str,
         user_lang: str,
+        payment_kind: str = "base_subscription",
     ) -> Tuple[bool, int | str]:
         """
         Apply a discount promo code (sets active discount for user).
@@ -220,6 +221,7 @@ class PromoCodeService:
             session,
             user_id,
             include_expired=True,
+            payment_kind=payment_kind,
         )
         if existing_discount:
             now_utc = datetime.now(timezone.utc)
@@ -228,6 +230,7 @@ class PromoCodeService:
                     session,
                     user_id,
                     now=now_utc,
+                    payment_kind=payment_kind,
                 )
                 if cleared:
                     await promo_code_dal.decrement_promo_code_usage(
@@ -247,11 +250,11 @@ class PromoCodeService:
                                discount_pct=existing_discount.discount_percentage)
             else:
                 # Existing discount but promo not found - clear it and continue
-                await active_discount_dal.clear_active_discount(session, user_id)
+                await active_discount_dal.clear_active_discount(session, user_id, payment_kind=payment_kind)
 
         # Get discount promo code
         promo_data = await promo_code_dal.get_active_discount_promo_code_by_code_str(
-            session, code_input_upper
+            session, code_input_upper, payment_kind=payment_kind
         )
 
         if not promo_data:
@@ -274,6 +277,7 @@ class PromoCodeService:
             promo_code_id=promo_data.promo_code_id,
             discount_percentage=promo_data.discount_percentage,
             expires_at=expires_at,
+            payment_kind=payment_kind,
         )
 
         if not active_discount:
@@ -289,6 +293,7 @@ class PromoCodeService:
                 session,
                 user_id=user_id,
                 promo_code_id=promo_data.promo_code_id,
+                payment_kind=payment_kind,
             )
             return False, _("promo_code_not_found_or_not_discount", code=code_input_upper)
 
@@ -301,7 +306,8 @@ class PromoCodeService:
     async def get_user_active_discount(
         self,
         session: AsyncSession,
-        user_id: int
+        user_id: int,
+        payment_kind: str = "base_subscription",
     ) -> Optional[Tuple[int, str]]:
         """
         Get user's active discount if any.
@@ -311,6 +317,7 @@ class PromoCodeService:
             session,
             user_id,
             include_expired=True,
+            payment_kind=payment_kind,
         )
         if not active_discount:
             return None
@@ -321,6 +328,7 @@ class PromoCodeService:
                 session,
                 user_id,
                 now=now_utc,
+                payment_kind=payment_kind,
             )
             if cleared:
                 await promo_code_dal.decrement_promo_code_usage(
@@ -335,7 +343,7 @@ class PromoCodeService:
         )
         if not promo:
             # Discount exists but promo not found - clear it
-            await active_discount_dal.clear_active_discount(session, user_id)
+            await active_discount_dal.clear_active_discount(session, user_id, payment_kind=payment_kind)
             return None
 
         # Check if promo code has expired
@@ -345,7 +353,7 @@ class PromoCodeService:
                 f"Promo code {promo.code} expired (valid_until: {promo.valid_until}). "
                 f"Clearing active discount for user {user_id}"
             )
-            cleared = await active_discount_dal.clear_active_discount(session, user_id)
+            cleared = await active_discount_dal.clear_active_discount(session, user_id, payment_kind=payment_kind)
             if cleared:
                 await promo_code_dal.decrement_promo_code_usage(session, promo.promo_code_id)
             return None
@@ -375,7 +383,8 @@ class PromoCodeService:
         self,
         session: AsyncSession,
         user_id: int,
-        payment_id: int
+        payment_id: int,
+        payment_kind: Optional[str] = None,
     ) -> bool:
         """
         Consume discount after successful payment.
@@ -442,6 +451,7 @@ class PromoCodeService:
             session,
             user_id,
             include_expired=True,
+            payment_kind=payment_kind or payment_record.kind,
         )
 
         # Reservation is best-effort cleanup at this point; payment success already happened.
@@ -450,6 +460,7 @@ class PromoCodeService:
                 session,
                 user_id=user_id,
                 promo_code_id=promo_code_id,
+                payment_kind=payment_kind or payment_record.kind,
             )
         elif active_discount and active_discount.promo_code_id != promo_code_id:
             logging.info(

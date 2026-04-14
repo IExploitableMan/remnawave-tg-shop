@@ -5,11 +5,27 @@ from aiogram import F, Router, types
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot.utils.product_offers import (
+    get_invoice_message_key,
+    get_payment_description,
+    is_traffic_payment_kind,
+    normalize_payment_kind,
+)
 from bot.middlewares.i18n import JsonI18n
 from bot.services.stars_service import StarsService
 from config.settings import Settings
 
 router = Router(name="user_subscription_payments_stars_router")
+
+
+def _get_back_offer_callback(value: float, payment_kind: str) -> str:
+    value_str = str(int(value)) if float(value).is_integer() else f"{value:g}"
+    payment_kind = normalize_payment_kind(payment_kind)
+    if payment_kind == "addon_subscription":
+        return f"subscribe_addon_period:{value_str}"
+    if payment_kind == "addon_traffic_topup":
+        return f"subscribe_addon_traffic:{value_str}"
+    return f"subscribe_period:{value_str}"
 
 
 @router.callback_query(F.data.startswith("pay_stars:"))
@@ -44,7 +60,7 @@ async def pay_stars_callback_handler(
         parts = data_payload.split(":")
         months = float(parts[0])
         stars_price = int(float(parts[1]))
-        sale_mode = parts[2] if len(parts) > 2 else "subscription"
+        sale_mode = normalize_payment_kind(parts[2] if len(parts) > 2 else "base_subscription")
     except (ValueError, IndexError):
         try:
             await callback.answer(get_text("error_try_again"), show_alert=True)
@@ -54,11 +70,7 @@ async def pay_stars_callback_handler(
 
     user_id = callback.from_user.id
     human_value = str(int(months)) if float(months).is_integer() else f"{months:g}"
-    payment_description = (
-        get_text("payment_description_traffic", traffic_gb=human_value)
-        if sale_mode == "traffic"
-        else get_text("payment_description_subscription", months=int(months))
-    )
+    payment_description = get_payment_description(get_text, months, sale_mode)
 
     payment_db_id = await stars_service.create_invoice(
         session=session,
@@ -74,7 +86,7 @@ async def pay_stars_callback_handler(
         try:
             await callback.message.edit_text(
                 get_text(
-                    "payment_invoice_sent_message_traffic" if sale_mode == "traffic" else "payment_invoice_sent_message",
+                    get_invoice_message_key(sale_mode),
                     months=int(months),
                     traffic_gb=human_value,
                 ),
@@ -83,7 +95,7 @@ async def pay_stars_callback_handler(
                         [
                             InlineKeyboardButton(
                                 text=get_text("back_to_payment_methods_button"),
-                                callback_data=f"subscribe_period:{human_value}",
+                                callback_data=_get_back_offer_callback(months, sale_mode),
                             )
                         ],
                         [
@@ -132,7 +144,7 @@ async def handle_successful_stars_payment(
         parts = (payload or "").split(":")
         payment_db_id = int(parts[0])
         months = float(parts[1]) if len(parts) > 1 else 0
-        sale_mode = parts[2] if len(parts) > 2 else "subscription"
+        sale_mode = normalize_payment_kind(parts[2] if len(parts) > 2 else "base_subscription")
     except Exception:
         return
 

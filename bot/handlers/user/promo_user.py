@@ -16,6 +16,12 @@ from bot.keyboards.inline.user_keyboards import (
 )
 from datetime import datetime
 from bot.middlewares.i18n import JsonI18n
+from db.dal import promo_code_dal
+from bot.utils.product_kinds import (
+    PAYMENT_KIND_ADDON_SUBSCRIPTION,
+    PAYMENT_KIND_ADDON_TRAFFIC_TOPUP,
+    PAYMENT_KIND_BASE_SUBSCRIPTION,
+)
 
 from .start import send_main_menu
 
@@ -27,6 +33,19 @@ SUSPICIOUS_SQL_KEYWORDS_REGEX = re.compile(
     re.IGNORECASE)
 SUSPICIOUS_CHARS_REGEX = re.compile(r"(--|#\s|;|\*\/|\/\*)")
 MAX_PROMO_CODE_INPUT_LENGTH = 100
+
+
+def _preferred_payment_kind_for_discount(promo_model) -> str:
+    allowed = []
+    if getattr(promo_model, "applies_to_base_subscription", False):
+        allowed.append(PAYMENT_KIND_BASE_SUBSCRIPTION)
+    if getattr(promo_model, "applies_to_addon_subscription", False):
+        allowed.append(PAYMENT_KIND_ADDON_SUBSCRIPTION)
+    if getattr(promo_model, "applies_to_addon_traffic_topup", False):
+        allowed.append(PAYMENT_KIND_ADDON_TRAFFIC_TOPUP)
+    if PAYMENT_KIND_BASE_SUBSCRIPTION in allowed:
+        return PAYMENT_KIND_BASE_SUBSCRIPTION
+    return allowed[0] if allowed else PAYMENT_KIND_BASE_SUBSCRIPTION
 
 
 async def prompt_promo_code_input(callback: types.CallbackQuery,
@@ -154,8 +173,12 @@ async def process_promo_code_input(message: types.Message, state: FSMContext,
             )
         else:
             # Bonus code failed, try as DISCOUNT code
+            promo_model = await promo_code_dal.get_promo_code_by_code(session, code_input.upper())
+            payment_kind = PAYMENT_KIND_BASE_SUBSCRIPTION
+            if promo_model and getattr(promo_model, "promo_type", None) == "discount":
+                payment_kind = _preferred_payment_kind_for_discount(promo_model)
             success_discount, result_discount = await promo_code_service.apply_discount_promo_code(
-                session, user.id, code_input, current_lang
+                session, user.id, code_input, current_lang, payment_kind=payment_kind
             )
 
             if success_discount:

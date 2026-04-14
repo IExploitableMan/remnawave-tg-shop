@@ -16,6 +16,12 @@ from bot.services.subscription_service import SubscriptionService
 from bot.services.referral_service import ReferralService
 from bot.services.notification_service import NotificationService
 from bot.keyboards.inline.user_keyboards import get_connect_and_main_keyboard
+from bot.utils.product_offers import (
+    is_traffic_payment_kind,
+    normalize_payment_kind,
+    resolve_base_price,
+)
+from bot.utils.product_kinds import PAYMENT_KIND_ADDON_SUBSCRIPTION, PAYMENT_KIND_BASE_SUBSCRIPTION
 from db.dal import payment_dal, user_dal
 from bot.utils.text_sanitizer import sanitize_display_name, username_for_display
 from bot.utils.config_link import prepare_config_links
@@ -99,12 +105,14 @@ class SeverPayService:
         amount: float,
         currency: Optional[str],
         description: str,
+        payment_kind: str = "base_subscription",
         promo_code_service=None,
         session=None,
     ) -> Tuple[bool, Dict[str, Any]]:
         if not self.configured:
             logging.error("SeverPayService is not configured. Cannot create payment.")
             return False, {"message": "service_not_configured"}
+        payment_kind = normalize_payment_kind(payment_kind)
 
         # Check for active discount to save metadata (price already discounted from previous step)
         original_amount = None
@@ -113,20 +121,18 @@ class SeverPayService:
 
         if promo_code_service and session:
             from db.dal import active_discount_dal
-            active_discount = await active_discount_dal.get_active_discount(session, user_id)
+            active_discount = await active_discount_dal.get_active_discount(
+                session,
+                user_id,
+                payment_kind=payment_kind,
+            )
             if active_discount:
                 # Price is already discounted, calculate original price backwards
                 discount_pct = active_discount.discount_percentage
                 promo_code_id = active_discount.promo_code_id
                 denominator = 1 - discount_pct / 100
                 if denominator <= 0:
-                    traffic_mode = bool(getattr(self.settings, "traffic_sale_mode", False))
-                    price_source = (
-                        getattr(self.settings, "traffic_packages", {}) or {}
-                        if traffic_mode
-                        else (self.settings.subscription_options or {})
-                    )
-                    fallback_original = price_source.get(months)
+                    fallback_original = resolve_base_price(self.settings, months, payment_kind, stars=False)
                     if fallback_original is not None:
                         original_amount = fallback_original
                         discount_amount = original_amount - amount
@@ -288,7 +294,7 @@ class SeverPayService:
                         return web.json_response({"status": False, "msg": "currency_mismatch"}, status=400)
 
             payment_months = payment.subscription_duration_months or 1
-            sale_mode = "traffic" if self.settings.traffic_sale_mode else "subscription"
+            sale_mode = normalize_payment_kind(payment.kind or "base_subscription")
             if status == "success":
                 try:
                     provider_id = provider_payment_id or str(payment.payment_id)
@@ -307,17 +313,18 @@ class SeverPayService:
                     activation = await self.subscription_service.activate_subscription(
                         session,
                         payment.user_id,
-                        int(payment_months) if sale_mode != "traffic" else 0,
+                        int(payment_months) if not is_traffic_payment_kind(sale_mode) else 0,
                         float(payment.amount),
                         payment.payment_id,
                         promo_code_id_from_payment=payment.promo_code_id,
                         provider="severpay",
                         sale_mode=sale_mode,
-                        traffic_gb=payment_months if sale_mode == "traffic" else None,
+                        traffic_gb=payment_months if is_traffic_payment_kind(sale_mode) else None,
+                        payment_kind=sale_mode,
                     )
 
                     referral_bonus = None
-                    if sale_mode != "traffic":
+                    if sale_mode == PAYMENT_KIND_BASE_SUBSCRIPTION:
                         referral_bonus = await self.referral_service.apply_referral_bonuses_for_payment(
                             session,
                             payment.user_id,
@@ -349,10 +356,16 @@ class SeverPayService:
 
                 traffic_label = str(int(payment_months)) if float(payment_months).is_integer() else f"{payment_months:g}"
 
-                if sale_mode == "traffic":
+                if is_traffic_payment_kind(sale_mode):
                     text = _(
-                        "payment_successful_traffic_full",
+                        "payment_successful_addon_traffic_full",
                         traffic_gb=traffic_label,
+                        end_date=final_end.strftime("%Y-%m-%d") if final_end else "",
+                        config_link=config_link_text,
+                    )
+                elif sale_mode == PAYMENT_KIND_ADDON_SUBSCRIPTION:
+                    text = _(
+                        "payment_successful_addon_full",
                         end_date=final_end.strftime("%Y-%m-%d") if final_end else "",
                         config_link=config_link_text,
                     )
@@ -417,8 +430,8 @@ class SeverPayService:
                         user_id=payment.user_id,
                         amount=float(payment.amount),
                         currency=payment.currency,
-                        months=int(payment_months) if sale_mode != "traffic" else 0,
-                        traffic_gb=payment_months if sale_mode == "traffic" else None,
+                        months=int(payment_months) if not is_traffic_payment_kind(sale_mode) else 0,
+                        traffic_gb=payment_months if is_traffic_payment_kind(sale_mode) else None,
                         payment_provider="severpay",
                         username=db_user.username if db_user else None,
                     )

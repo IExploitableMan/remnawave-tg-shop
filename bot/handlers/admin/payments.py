@@ -18,6 +18,16 @@ from bot.middlewares.i18n import JsonI18n
 router = Router(name="admin_payments_router")
 
 
+def _payment_kind_label(payment: Payment) -> str:
+    kind = (payment.kind or "base_subscription").strip().lower()
+    labels = {
+        "base_subscription": "Base",
+        "addon_subscription": "Add-on",
+        "addon_traffic_topup": "Add-on Top-up",
+    }
+    return labels.get(kind, kind or "Unknown")
+
+
 async def get_payments_with_pagination(session: AsyncSession, page: int = 0, 
                                      page_size: int = 10) -> tuple[List[Payment], int]:
     """Get payments with pagination and total count."""
@@ -67,8 +77,7 @@ def format_payment_text(payment: Payment, i18n: JsonI18n, lang: str, settings: S
         'platega': 'Platega',
     }.get(payment.provider, payment.provider or 'Unknown')
 
-    traffic_mode = getattr(settings, "traffic_sale_mode", False)
-    if traffic_mode:
+    if payment.kind == "addon_traffic_topup":
         traffic_val = payment.subscription_duration_months or 0
         traffic_display = str(int(traffic_val)) if float(traffic_val).is_integer() else f"{traffic_val:g}"
         period_line = _("admin_payment_traffic_label", traffic_gb=traffic_display)
@@ -79,6 +88,7 @@ def format_payment_text(payment: Payment, i18n: JsonI18n, lang: str, settings: S
         f"{status_emoji} <b>{payment.amount} {payment.currency}</b>\n"
         f"👤 {user_info}\n"
         f"💳 {provider_text}\n"
+        f"🧩 {_payment_kind_label(payment)}\n"
         f"📅 {payment_date}\n"
         f"{period_line}\n"
         f"📋 {payment.status}\n"
@@ -209,19 +219,18 @@ async def export_payments_csv_handler(callback: types.CallbackQuery, i18n_data: 
             _("admin_csv_amount"),
             _("admin_csv_currency"),
             _("admin_csv_provider"),
+            "Kind",
             _("admin_csv_status"),
             _("admin_csv_description"),
             _("admin_csv_units"),
             _("admin_csv_created_at"),
             _("admin_csv_provider_payment_id")
         ])
-
-        traffic_mode = getattr(settings, "traffic_sale_mode", False)
         
         # Write payment data
         for payment in all_payments:
             units_val = payment.subscription_duration_months or ""
-            if traffic_mode and units_val not in ("", None):
+            if payment.kind == "addon_traffic_topup" and units_val not in ("", None):
                 try:
                     units_val = str(int(units_val)) if float(units_val).is_integer() else f"{units_val:g}"
                 except Exception:
@@ -234,6 +243,7 @@ async def export_payments_csv_handler(callback: types.CallbackQuery, i18n_data: 
                 payment.amount,
                 payment.currency,
                 payment.provider or "",
+                payment.kind or "",
                 payment.status,
                 payment.description or "",
                 units_val,

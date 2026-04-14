@@ -56,7 +56,8 @@ async def ensure_payment_with_provider_id(
         months: int,
         description: str,
         provider: str,
-        provider_payment_id: str) -> Payment:
+        provider_payment_id: str,
+        payment_kind: str = "base_subscription") -> Payment:
     """Idempotently create a payment record for a provider event.
 
     If a payment with the same provider_payment_id already exists, returns it.
@@ -76,6 +77,7 @@ async def ensure_payment_with_provider_id(
         "subscription_duration_months": months,
         "provider_payment_id": provider_payment_id,
         "provider": provider,
+        "kind": payment_kind,
     }
     return await create_payment_record(session, payment_payload)
 
@@ -114,27 +116,36 @@ async def update_payment_status_by_db_id(
 
 async def get_recent_payment_logs_with_user(session: AsyncSession,
                                             limit: int = 20,
-                                            offset: int = 0) -> List[Payment]:
+                                            offset: int = 0,
+                                            payment_kind: Optional[str] = None) -> List[Payment]:
     stmt = (select(Payment).options(selectinload(Payment.user))
             .where(Payment.status == 'succeeded')
-            .order_by(Payment.created_at.desc())
-            .limit(limit).offset(offset))
+            .order_by(Payment.created_at.desc()))
+    if payment_kind:
+        stmt = stmt.where(Payment.kind == payment_kind)
+    stmt = stmt.limit(limit).offset(offset)
     result = await session.execute(stmt)
     return result.scalars().all()
 
 
-async def get_payments_count(session: AsyncSession) -> int:
+async def get_payments_count(session: AsyncSession, payment_kind: Optional[str] = None) -> int:
     """Get total count of successful payments."""
     stmt = select(func.count(Payment.payment_id)).where(Payment.status == 'succeeded')
+    if payment_kind:
+        stmt = stmt.where(Payment.kind == payment_kind)
     result = await session.execute(stmt)
     return result.scalar() or 0
 
 
-async def get_all_succeeded_payments_with_user(session: AsyncSession) -> List[Payment]:
+async def get_all_succeeded_payments_with_user(
+        session: AsyncSession,
+        payment_kind: Optional[str] = None) -> List[Payment]:
     """Get all successful payments with user data for export."""
     stmt = (select(Payment).options(selectinload(Payment.user))
             .where(Payment.status == 'succeeded')
             .order_by(Payment.created_at.desc()))
+    if payment_kind:
+        stmt = stmt.where(Payment.kind == payment_kind)
     result = await session.execute(stmt)
     return result.scalars().all()
 
@@ -370,12 +381,27 @@ async def get_financial_statistics(session: AsyncSession) -> Dict[str, Any]:
     today_count = await session.execute(stmt_count_today)
     today_payments_count = today_count.scalar() or 0
     
+    by_kind_stmt = (
+        select(Payment.kind, func.sum(Payment.amount), func.count(Payment.payment_id))
+        .where(Payment.status == "succeeded")
+        .group_by(Payment.kind)
+    )
+    by_kind_rows = await session.execute(by_kind_stmt)
+    revenue_by_kind = {
+        (kind or "unknown"): {
+            "revenue": float(amount or 0),
+            "count": int(count or 0),
+        }
+        for kind, amount, count in by_kind_rows.all()
+    }
+
     return {
         "today_revenue": float(today_amount),
         "week_revenue": float(week_amount),
         "month_revenue": float(month_amount),
         "all_time_revenue": float(all_amount),
-        "today_payments_count": today_payments_count
+        "today_payments_count": today_payments_count,
+        "revenue_by_kind": revenue_by_kind,
     }
 
 

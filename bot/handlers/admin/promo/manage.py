@@ -19,6 +19,18 @@ from bot.middlewares.i18n import JsonI18n
 router = Router(name="promo_manage_router")
 
 
+def _promo_scope_text(promo: PromoCode, i18n: JsonI18n, current_lang: str) -> str:
+    _ = lambda key, **kwargs: i18n.gettext(current_lang, key, **kwargs)
+    labels = []
+    if promo.applies_to_base_subscription:
+        labels.append(_("admin_promo_scope_short_base"))
+    if promo.applies_to_addon_subscription:
+        labels.append(_("admin_promo_scope_short_addon"))
+    if promo.applies_to_addon_traffic_topup:
+        labels.append(_("admin_promo_scope_short_topup"))
+    return ", ".join(labels) if labels else _("admin_promo_scope_short_none")
+
+
 def get_promo_status_emoji_and_text(promo: PromoCode, i18n: JsonI18n, current_lang: str):
     """Determine promo code status and return emoji + text"""
     _ = lambda key, **kwargs: i18n.gettext(current_lang, key, **kwargs)
@@ -61,6 +73,7 @@ async def get_promo_detail_text_and_keyboard(promo_id: int, session: AsyncSessio
         _("admin_promo_card_type", type=type_name),
         value_line,
         _("admin_promo_card_activations", current=promo.current_activations, max=promo.max_activations),
+        _("admin_promo_card_scope", scope=_promo_scope_text(promo, i18n, current_lang)),
         _("admin_promo_card_validity", validity=validity),
         _("admin_promo_card_status", status=status),
         _("admin_promo_card_created", created=created),
@@ -99,7 +112,7 @@ async def view_promo_codes_handler(callback: types.CallbackQuery, i18n_data: dic
                 value_display = f"🎁 {p.bonus_days}д"
             validity_display = p.valid_until.strftime('%d.%m.%Y') if p.valid_until else _('admin_promo_valid_indefinitely')
             promo_lines.append(
-                f"{status_emoji} <code>{p.code}</code> | {value_display} | 📊 {p.current_activations}/{p.max_activations} | ⏰ {validity_display}"
+                f"{status_emoji} <code>{p.code}</code> | {value_display} | 🎯 {_promo_scope_text(p, i18n, current_lang)} | 📊 {p.current_activations}/{p.max_activations} | ⏰ {validity_display}"
             )
         text = "\n".join(promo_lines)
     
@@ -321,6 +334,7 @@ async def promo_export_all_handler(callback: types.CallbackQuery, i18n_data: dic
         writer.writerow([
             i18n.gettext(export_lang, "admin_promo_csv_code"),
             "Type",
+            "Scope",
             i18n.gettext(export_lang, "admin_promo_csv_bonus_days"),
             "Discount %",
             i18n.gettext(export_lang, "admin_promo_csv_max_activations"),
@@ -345,6 +359,7 @@ async def promo_export_all_handler(callback: types.CallbackQuery, i18n_data: dic
             row = [
                 promo.code,
                 promo_type,
+                _promo_scope_text(promo, i18n, export_lang),
                 bonus_days_val,
                 discount_val,
                 promo.max_activations,

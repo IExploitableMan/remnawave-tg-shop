@@ -22,6 +22,11 @@ from bot.middlewares.i18n import JsonI18n
 from config.settings import Settings
 from bot.services.notification_service import NotificationService
 from bot.keyboards.inline.user_keyboards import get_connect_and_main_keyboard
+from bot.utils.product_offers import (
+    is_traffic_payment_kind,
+    normalize_payment_kind,
+)
+from bot.utils.product_kinds import PAYMENT_KIND_ADDON_SUBSCRIPTION, PAYMENT_KIND_BASE_SUBSCRIPTION
 from bot.utils.text_sanitizer import sanitize_display_name, username_for_display
 from bot.utils.config_link import prepare_config_links
 
@@ -42,7 +47,9 @@ async def process_successful_payment(session: AsyncSession, bot: Bot,
     user_id_str = metadata.get("user_id")
     subscription_months_str = metadata.get("subscription_months")
     traffic_gb_str = metadata.get("traffic_gb")
-    sale_mode = metadata.get("sale_mode") or ("traffic" if settings.traffic_sale_mode else "subscription")
+    payment_kind = normalize_payment_kind(
+        metadata.get("payment_kind") or metadata.get("sale_mode")
+    )
     promo_code_id_str = metadata.get("promo_code_id")
     payment_db_id_str = metadata.get("payment_db_id")
     auto_renew_subscription_id_str = metadata.get(
@@ -72,7 +79,10 @@ async def process_successful_payment(session: AsyncSession, bot: Bot,
             )
             return False
         payment_db_id = int(payment_db_id_str)
-        is_auto_renew = bool(auto_renew_subscription_id_str and sale_mode != "traffic")
+        is_auto_renew = bool(
+            auto_renew_subscription_id_str
+            and payment_kind == PAYMENT_KIND_BASE_SUBSCRIPTION
+        )
         promo_code_id = int(
             promo_code_id_str
         ) if promo_code_id_str and promo_code_id_str.isdigit() else None
@@ -317,7 +327,7 @@ async def process_successful_payment(session: AsyncSession, bot: Bot,
         except Exception:
             logging.exception("Failed to persist YooKassa payment method from webhook")
 
-        months_for_activation = int(subscription_months) if sale_mode != "traffic" else 0
+        months_for_activation = int(subscription_months) if not is_traffic_payment_kind(payment_kind) else 0
         try:
             activation_details = await subscription_service.activate_subscription(
                 session,
@@ -327,8 +337,9 @@ async def process_successful_payment(session: AsyncSession, bot: Bot,
                 payment_db_id,
                 promo_code_id_from_payment=promo_code_id,
                 provider="yookassa",
-                sale_mode=sale_mode,
-                traffic_gb=traffic_amount_gb if sale_mode == "traffic" else None,
+                sale_mode=payment_kind,
+                traffic_gb=traffic_amount_gb if is_traffic_payment_kind(payment_kind) else None,
+                payment_kind=payment_kind,
             )
         except Exception:
             previous_status = payment_before_update.status if payment_before_update else "pending_yookassa"
@@ -375,7 +386,7 @@ async def process_successful_payment(session: AsyncSession, bot: Bot,
             "applied_promo_bonus_days", 0)
 
         referral_bonus_info = None
-        if sale_mode != "traffic":
+        if payment_kind == PAYMENT_KIND_BASE_SUBSCRIPTION:
             referral_bonus_info = await referral_service.apply_referral_bonuses_for_payment(
                 session,
                 user_id,
@@ -401,7 +412,7 @@ async def process_successful_payment(session: AsyncSession, bot: Bot,
         if should_send_lknpd_receipt:
             receipt_item_name = payment_info_from_webhook.get("description")
             if not receipt_item_name:
-                if sale_mode == "traffic":
+                if is_traffic_payment_kind(payment_kind):
                     receipt_item_name = settings.LKNPD_RECEIPT_NAME_TRAFFIC.format(gb=traffic_label)
                 else:
                     receipt_item_name = settings.LKNPD_RECEIPT_NAME_SUBSCRIPTION.format(months=int(subscription_months))
@@ -422,20 +433,39 @@ async def process_successful_payment(session: AsyncSession, bot: Bot,
         )
         config_link_text = config_link_display or _("config_link_not_available")
         # For auto-renew charges, avoid re-sending config link; send concise message
-        if sale_mode != "traffic" and is_auto_renew and final_end_date_for_user:
+        if payment_kind == PAYMENT_KIND_BASE_SUBSCRIPTION and is_auto_renew and final_end_date_for_user:
             details_message = _(
                 "yookassa_auto_renewal",
                 months=int(subscription_months),
                 end_date=final_end_date_for_user.strftime('%Y-%m-%d'),
             )
             details_markup = None
-        elif sale_mode == "traffic":
+        elif is_traffic_payment_kind(payment_kind):
             details_message = _(
-                "payment_successful_traffic_full",
+                "payment_successful_addon_traffic_full",
                 traffic_gb=traffic_label,
                 end_date=final_end_date_for_user.strftime('%Y-%m-%d') if final_end_date_for_user else "-",
                 config_link=config_link_text,
             )
+            details_markup = get_connect_and_main_keyboard(
+                user_lang,
+                i18n,
+                settings,
+                config_link_display,
+                connect_button_url=connect_button_url,
+                preserve_message=True,
+            )
+        elif payment_kind == PAYMENT_KIND_ADDON_SUBSCRIPTION:
+            details_message = _(
+                "payment_successful_addon_full",
+                end_date=final_end_date_for_user.strftime('%Y-%m-%d') if final_end_date_for_user else "-",
+                config_link=config_link_text,
+            )
+            if activation_details.get("warning_base_ends_before_addon"):
+                details_message += "\n\n" + _(
+                    "addon_purchase_base_shorter_warning",
+                    base_end_date=base_subscription_end_date.strftime('%Y-%m-%d') if base_subscription_end_date else "-",
+                )
             details_markup = get_connect_and_main_keyboard(
                 user_lang,
                 i18n,
@@ -516,10 +546,10 @@ async def process_successful_payment(session: AsyncSession, bot: Bot,
                 user_id=user_id,
                 amount=payment_value,
                 currency="RUB",
-                months=int(subscription_months) if sale_mode != "traffic" else 0,
+                months=int(subscription_months) if not is_traffic_payment_kind(payment_kind) else 0,
                 payment_provider="yookassa",  # This is specifically for YooKassa webhook
                 username=user.username if user else None,
-                traffic_gb=traffic_amount_gb if sale_mode == "traffic" else None,
+                traffic_gb=traffic_amount_gb if is_traffic_payment_kind(payment_kind) else None,
             )
         except Exception as e:
             logging.error(f"Failed to send payment notification: {e}")

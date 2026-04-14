@@ -12,7 +12,8 @@ async def apply_discount_to_payment(
     session: AsyncSession,
     user_id: int,
     original_price: float,
-    promo_code_service=None
+    promo_code_service=None,
+    payment_kind: str = "base_subscription",
 ) -> Tuple[float, Optional[float], Optional[int]]:
     """
     Apply active discount to payment if exists.
@@ -23,7 +24,11 @@ async def apply_discount_to_payment(
     if not promo_code_service:
         return original_price, None, None
 
-    active_discount = await active_discount_dal.get_active_discount(session, user_id)
+    active_discount = await active_discount_dal.get_active_discount(
+        session,
+        user_id,
+        payment_kind=payment_kind,
+    )
     if not active_discount:
         return original_price, None, None
 

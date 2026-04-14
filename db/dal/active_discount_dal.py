@@ -14,6 +14,7 @@ async def set_active_discount(
     promo_code_id: int,
     discount_percentage: int,
     expires_at: datetime,
+    payment_kind: str = "base_subscription",
 ) -> Optional[ActiveDiscount]:
     """
     Set active discount for user.
@@ -37,6 +38,7 @@ async def set_active_discount(
         user_id=user_id,
         promo_code_id=promo_code_id,
         discount_percentage=discount_percentage,
+        payment_kind=payment_kind,
         activated_at=now_utc,
         expires_at=expires_at,
     )
@@ -54,10 +56,13 @@ async def get_active_discount(
     session: AsyncSession,
     user_id: int,
     include_expired: bool = False,
+    payment_kind: Optional[str] = None,
 ) -> Optional[ActiveDiscount]:
     """Get active discount for user if exists."""
     now_utc = datetime.now(timezone.utc)
     stmt = select(ActiveDiscount).where(ActiveDiscount.user_id == user_id)
+    if payment_kind:
+        stmt = stmt.where(ActiveDiscount.payment_kind == payment_kind)
     if not include_expired:
         stmt = stmt.where(ActiveDiscount.expires_at > now_utc)
     result = await session.execute(stmt)
@@ -66,13 +71,16 @@ async def get_active_discount(
 
 async def clear_active_discount(
     session: AsyncSession,
-    user_id: int
+    user_id: int,
+    payment_kind: Optional[str] = None,
 ) -> bool:
     """
     Clear active discount for user.
     Returns True if discount was cleared, False if no discount was found.
     """
     stmt = delete(ActiveDiscount).where(ActiveDiscount.user_id == user_id)
+    if payment_kind:
+        stmt = stmt.where(ActiveDiscount.payment_kind == payment_kind)
     result = await session.execute(stmt)
     await session.flush()
     cleared = result.rowcount > 0
@@ -85,6 +93,7 @@ async def clear_active_discount_if_expired(
     session: AsyncSession,
     user_id: int,
     now: Optional[datetime] = None,
+    payment_kind: Optional[str] = None,
 ) -> bool:
     """
     Clear active discount for user only when it has already expired.
@@ -94,6 +103,8 @@ async def clear_active_discount_if_expired(
         ActiveDiscount.user_id == user_id,
         ActiveDiscount.expires_at <= now_utc,
     )
+    if payment_kind:
+        stmt = stmt.where(ActiveDiscount.payment_kind == payment_kind)
     result = await session.execute(stmt)
     await session.flush()
     cleared = result.rowcount > 0
@@ -107,6 +118,7 @@ async def clear_active_discount_if_matches(
     user_id: int,
     promo_code_id: Optional[int] = None,
     expires_at_lte: Optional[datetime] = None,
+    payment_kind: Optional[str] = None,
 ) -> bool:
     """
     Clear active discount for user only when additional constraints match.
@@ -116,6 +128,8 @@ async def clear_active_discount_if_matches(
         conditions.append(ActiveDiscount.promo_code_id == promo_code_id)
     if expires_at_lte is not None:
         conditions.append(ActiveDiscount.expires_at <= expires_at_lte)
+    if payment_kind is not None:
+        conditions.append(ActiveDiscount.payment_kind == payment_kind)
 
     stmt = delete(ActiveDiscount).where(*conditions)
     result = await session.execute(stmt)

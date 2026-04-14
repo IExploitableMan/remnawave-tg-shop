@@ -89,6 +89,28 @@ async def get_user_by_panel_uuid(
     return result.scalar_one_or_none()
 
 
+async def get_user_by_addon_panel_uuid(
+    session: AsyncSession, panel_uuid: str
+) -> Optional[User]:
+    stmt = select(User).where(User.addon_panel_user_uuid == panel_uuid)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def get_user_by_any_panel_uuid(
+    session: AsyncSession,
+    panel_uuid: str,
+) -> Optional[User]:
+    stmt = select(User).where(
+        or_(
+            User.panel_user_uuid == panel_uuid,
+            User.addon_panel_user_uuid == panel_uuid,
+        )
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
 ## Removed unused generic get_user helper to keep DAL explicit and simple
 
 

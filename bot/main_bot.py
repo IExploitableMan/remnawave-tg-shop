@@ -157,6 +157,17 @@ async def on_startup_configured(dispatcher: Dispatcher):
             exc_info=True,
         )
 
+    try:
+        subscription_service: Optional[SubscriptionService] = dispatcher.get("subscription_service")
+        if subscription_service:
+            await subscription_service.setup_addon_traffic_worker(async_session_factory)
+            logging.info("STARTUP: Add-on traffic worker initialized")
+    except Exception as e:
+        logging.error(
+            f"STARTUP: Failed to initialize add-on traffic worker: {e}",
+            exc_info=True,
+        )
+
     # Automatic sync on startup
     try:
         logging.info("STARTUP: Running automatic panel sync...")

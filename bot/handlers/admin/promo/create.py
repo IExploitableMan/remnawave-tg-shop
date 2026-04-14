@@ -15,6 +15,45 @@ from bot.middlewares.i18n import JsonI18n
 
 router = Router(name="promo_create_router")
 
+PROMO_SCOPE_OPTIONS = {
+    "base": (True, False, False),
+    "addon": (False, True, False),
+    "topup": (False, False, True),
+    "base_addon": (True, True, False),
+    "addon_topup": (False, True, True),
+    "all": (True, True, True),
+}
+
+
+def _get_scope_keyboard(current_lang: str, i18n: JsonI18n):
+    _ = lambda key, **kwargs: i18n.gettext(current_lang, key, **kwargs)
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=_("admin_promo_scope_base"), callback_data="promo_scope_select:base"))
+    builder.row(InlineKeyboardButton(text=_("admin_promo_scope_addon"), callback_data="promo_scope_select:addon"))
+    builder.row(InlineKeyboardButton(text=_("admin_promo_scope_topup"), callback_data="promo_scope_select:topup"))
+    builder.row(InlineKeyboardButton(text=_("admin_promo_scope_base_addon"), callback_data="promo_scope_select:base_addon"))
+    builder.row(InlineKeyboardButton(text=_("admin_promo_scope_addon_topup"), callback_data="promo_scope_select:addon_topup"))
+    builder.row(InlineKeyboardButton(text=_("admin_promo_scope_all"), callback_data="promo_scope_select:all"))
+    builder.row(InlineKeyboardButton(text=_("admin_back_to_panel"), callback_data="admin_action:main"))
+    return builder.as_markup()
+
+
+async def _prompt_promo_scope_selection(target, state: FSMContext, i18n_data: dict, settings: Settings):
+    current_lang = i18n_data.get("current_language", settings.DEFAULT_LANGUAGE)
+    i18n: Optional[JsonI18n] = i18n_data.get("i18n_instance")
+    if not i18n:
+        return
+    _ = lambda key, **kwargs: i18n.gettext(current_lang, key, **kwargs)
+    text = _("admin_promo_scope_prompt")
+    if hasattr(target, "message"):
+        try:
+            await target.message.edit_text(text, reply_markup=_get_scope_keyboard(current_lang, i18n), parse_mode="HTML")
+        except Exception:
+            await target.message.answer(text, reply_markup=_get_scope_keyboard(current_lang, i18n), parse_mode="HTML")
+        await target.answer()
+    else:
+        await target.answer(text, reply_markup=_get_scope_keyboard(current_lang, i18n), parse_mode="HTML")
+
 
 async def create_promo_prompt_handler(callback: types.CallbackQuery,
                                       state: FSMContext, i18n_data: dict,
@@ -349,7 +388,7 @@ async def process_promo_unlimited_validity(callback: types.CallbackQuery,
                                           settings: Settings,
                                           session: AsyncSession):
     await state.update_data(validity_days=None)
-    await create_promo_code_final(callback, state, i18n_data, settings, session)
+    await _prompt_promo_scope_selection(callback, state, i18n_data, settings)
 
 
 # Step 4: Handle set validity
@@ -414,7 +453,7 @@ async def process_promo_validity_days_handler(message: types.Message,
             return
         
         await state.update_data(validity_days=validity_days)
-        await create_promo_code_final(message, state, i18n_data, settings, session)
+        await _prompt_promo_scope_selection(message, state, i18n_data, settings)
         
     except ValueError:
         await message.answer(_(
@@ -423,6 +462,28 @@ async def process_promo_validity_days_handler(message: types.Message,
     except Exception as e:
         logging.error(f"Error processing promo validity days: {e}")
         await message.answer(_("error_occurred_try_again"))
+
+
+@router.callback_query(F.data.startswith("promo_scope_select:"), StateFilter(AdminStates.waiting_for_promo_validity_days))
+async def process_promo_scope_selection(
+    callback: types.CallbackQuery,
+    state: FSMContext,
+    i18n_data: dict,
+    settings: Settings,
+    session: AsyncSession,
+):
+    scope_code = callback.data.split(":", 1)[1]
+    applies = PROMO_SCOPE_OPTIONS.get(scope_code)
+    if not applies:
+        await callback.answer("Invalid scope", show_alert=True)
+        return
+    await state.update_data(
+        applies_to_base_subscription=applies[0],
+        applies_to_addon_subscription=applies[1],
+        applies_to_addon_traffic_topup=applies[2],
+        promo_scope_code=scope_code,
+    )
+    await create_promo_code_final(callback, state, i18n_data, settings, session)
 
 
 async def create_promo_code_final(callback_or_message,
@@ -449,7 +510,10 @@ async def create_promo_code_final(callback_or_message,
             "current_activations": 0,
             "is_active": True,
             "created_by_admin_id": callback_or_message.from_user.id,
-            "created_at": datetime.now(timezone.utc)
+            "created_at": datetime.now(timezone.utc),
+            "applies_to_base_subscription": data.get("applies_to_base_subscription", True),
+            "applies_to_addon_subscription": data.get("applies_to_addon_subscription", False),
+            "applies_to_addon_traffic_topup": data.get("applies_to_addon_traffic_topup", False),
         }
 
         # Set type-specific fields

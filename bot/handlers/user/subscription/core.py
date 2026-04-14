@@ -11,15 +11,19 @@ from sqlalchemy.future import select
 
 from config.settings import Settings
 from bot.keyboards.inline.user_keyboards import (
-    get_subscription_options_keyboard,
+    get_product_catalog_keyboard,
     get_back_to_main_menu_markup,
     get_autorenew_confirm_keyboard,
+)
+from bot.utils.product_offers import (
+    resolve_base_price,
 )
 from bot.services.subscription_service import SubscriptionService
 from bot.services.panel_api_service import PanelApiService
 from bot.middlewares.i18n import JsonI18n
 from db.dal import subscription_dal, user_billing_dal
 from db.models import Subscription
+from bot.utils.product_kinds import SUBSCRIPTION_KIND_ADDON, SUBSCRIPTION_KIND_BASE
 
 router = Router(name="user_subscription_core_router")
 
@@ -38,6 +42,29 @@ def _hwid_callback_token(hwid: Optional[str]) -> str:
     """Stable short token for callback_data; avoids 64b limit with raw HWID."""
     hwid_str = str(hwid or "")
     return hashlib.sha256(hwid_str.encode()).hexdigest()[:32]
+
+
+def _format_bytes_gb(value: Optional[float], fallback: str) -> str:
+    if value is None:
+        return fallback
+    try:
+        value_gb = float(value) / (2 ** 30)
+        return f"{value_gb:.2f} GB"
+    except Exception:
+        return str(value)
+
+
+def _addon_status_key(raw_status: Optional[str]) -> str:
+    normalized = (raw_status or "").upper()
+    if normalized in {"ACTIVE"}:
+        return "addon_status_active"
+    if normalized in {"SUSPENDED_BASE_REQUIRED", "SUSPENDED"}:
+        return "addon_status_suspended"
+    if normalized in {"TRAFFIC_EXHAUSTED", "LIMITED"}:
+        return "addon_status_limited"
+    if normalized in {"EXPIRED"}:
+        return "addon_status_expired"
+    return "addon_status_unknown"
 
 
 async def display_subscription_options(
@@ -63,51 +90,67 @@ async def display_subscription_options(
             await event.answer(err_msg)
         return
 
-    currency_symbol_val = "RUB"
-    traffic_packages = getattr(settings, "traffic_packages", {}) or {}
-    stars_traffic_packages = getattr(settings, "stars_traffic_packages", {}) or {}
-    traffic_mode = bool(getattr(settings, "traffic_sale_mode", False) or stars_traffic_packages)
+    async def _build_display_options(raw_options, payment_kind: str):
+        display: dict[float, tuple[float, str]] = {}
+        active_discount_info = None
+        if promo_code_service:
+            try:
+                active_discount_info = await promo_code_service.get_user_active_discount(
+                    session,
+                    event.from_user.id,
+                    payment_kind=payment_kind,
+                )
+            except Exception:
+                active_discount_info = None
+        for raw_value in raw_options.keys():
+            effective_value = float(raw_value)
+            rub_price = resolve_base_price(settings, effective_value, payment_kind, stars=False)
+            stars_price = resolve_base_price(settings, effective_value, payment_kind, stars=True)
+            if active_discount_info:
+                discount_pct, _promo_code = active_discount_info
+                if rub_price is not None:
+                    rub_price, _ = promo_code_service.calculate_discounted_price(rub_price, discount_pct)
+                if stars_price is not None:
+                    discounted_stars_price, _ = promo_code_service.calculate_discounted_price(float(stars_price), discount_pct)
+                    stars_price = math.ceil(discounted_stars_price)
+            if rub_price is not None:
+                display[effective_value] = (rub_price, "RUB")
+            elif stars_price is not None:
+                display[effective_value] = (float(stars_price), "⭐")
+        return display
 
-    options_are_stars = False
-    if traffic_mode:
-        if traffic_packages:
-            options = traffic_packages
-        elif stars_traffic_packages:
-            options = stars_traffic_packages
-            currency_symbol_val = "⭐"
-            options_are_stars = True
-        else:
-            options = {}
-    else:
-        options = settings.subscription_options
+    base_active_sub = await subscription_dal.get_active_subscription_by_user_id(
+        session,
+        event.from_user.id,
+        kind=SUBSCRIPTION_KIND_BASE,
+    )
+    addon_active_sub = await subscription_dal.get_active_subscription_by_user_id(
+        session,
+        event.from_user.id,
+        kind=SUBSCRIPTION_KIND_ADDON,
+    )
 
-    display_options = options
-    if options and promo_code_service:
-        try:
-            active_discount_info = await promo_code_service.get_user_active_discount(
-                session, event.from_user.id
-            )
-        except Exception:
-            active_discount_info = None
-        if active_discount_info:
-            discount_pct, _promo_code = active_discount_info
-            discounted_options = {}
-            for period, price in options.items():
-                if price is None:
-                    discounted_options[period] = price
-                else:
-                    discounted_price, _ = promo_code_service.calculate_discounted_price(
-                        price, discount_pct
-                    )
-                    if options_are_stars:
-                        discounted_price = math.ceil(discounted_price)
-                    discounted_options[period] = discounted_price
-            display_options = discounted_options
+    base_options = await _build_display_options(settings.subscription_options or {}, "base_subscription")
+    addon_option_map = (
+        await _build_display_options(settings.addon_subscription_options or {}, "addon_subscription")
+        if base_active_sub and settings.addon_enabled
+        else {}
+    )
+    addon_option = addon_option_map.get(1.0)
+    addon_topups = (
+        await _build_display_options(settings.addon_traffic_packages or {}, "addon_traffic_topup")
+        if addon_active_sub
+        else {}
+    )
 
-    if display_options:
-        text_content = get_text("select_traffic_package") if traffic_mode else get_text("select_subscription_period")
-        reply_markup = get_subscription_options_keyboard(
-            display_options, currency_symbol_val, current_lang, i18n, traffic_mode=traffic_mode
+    if base_options or addon_option or addon_topups:
+        text_content = get_text("select_subscription_catalog")
+        reply_markup = get_product_catalog_keyboard(
+            base_options=base_options,
+            addon_option=addon_option,
+            addon_topups=addon_topups,
+            lang=current_lang,
+            i18n_instance=i18n,
         )
     else:
         text_content = get_text("no_subscription_options_available")
@@ -171,9 +214,11 @@ async def my_subscription_command_handler(
         await target.answer(get_text("error_service_unavailable"))
         return
 
-    active = await subscription_service.get_active_subscription_details(session, event.from_user.id)
+    overview = await subscription_service.get_subscription_overview(session, event.from_user.id)
+    base_active = overview.get("base")
+    addon_active = overview.get("addon")
 
-    if not active:
+    if not base_active and not addon_active:
         text = get_text("subscription_not_active")
 
         buy_button = InlineKeyboardButton(
@@ -196,83 +241,100 @@ async def my_subscription_command_handler(
             await event.answer(text, reply_markup=kb)
         return
 
-    end_date = active.get("end_date")
-    days_left = (end_date.date() - datetime.now().date()).days if end_date else 0
-    traffic_mode = bool(getattr(settings, "traffic_sale_mode", False))
-    config_link_display = active.get("config_link")
-    connect_button_url = active.get("connect_button_url")
-    config_link_value = config_link_display or get_text("config_link_not_available")
-    def _fmt_gb(val: Optional[float]) -> str:
-        if val is None:
-            return get_text("traffic_na")
-        try:
-            if isinstance(val, (int, float)):
-                val_gb = float(val) / (2**30)
-                return f"{val_gb:.2f} GB"
-        except Exception as exc:
-            logging.debug("Suppressed exception in bot/handlers/user/subscription/core.py: %s", exc)
-        return str(val)
+    base_config_link_display = base_active.get("config_link") if base_active else None
+    base_connect_button_url = base_active.get("connect_button_url") if base_active else None
+    addon_config_link_display = addon_active.get("config_link") if addon_active else None
+    addon_connect_button_url = addon_active.get("connect_button_url") if addon_active else None
 
-    if traffic_mode:
-        limit_display = _fmt_gb(active.get("traffic_limit_bytes"))
-        used_display = _fmt_gb(active.get("traffic_used_bytes"))
-        remaining_display = get_text("traffic_na")
-        try:
-            limit_val = active.get("traffic_limit_bytes") or 0
-            used_val = active.get("traffic_used_bytes") or 0
-            remaining_val = max(0, float(limit_val) - float(used_val))
-            remaining_display = _fmt_gb(remaining_val)
-        except Exception as exc:
-            logging.debug("Suppressed exception in bot/handlers/user/subscription/core.py: %s", exc)
-        text = get_text(
-            "my_traffic_details",
-            status=active.get("status_from_panel", get_text("status_active")).capitalize(),
-            end_date=end_date.strftime("%Y-%m-%d") if end_date else get_text("traffic_no_expiry"),
-            traffic_limit=limit_display,
-            traffic_used=used_display,
-            traffic_left=remaining_display,
-            config_link=config_link_value,
+    text_parts = []
+    if base_active:
+        end_date = base_active.get("end_date")
+        days_left = (end_date.date() - datetime.now().date()).days if end_date else 0
+        text_parts.append(
+            get_text(
+                "my_subscription_base_block",
+                end_date=end_date.strftime("%Y-%m-%d") if end_date else "N/A",
+                days_left=max(0, days_left),
+                status=base_active.get("status_from_panel", get_text("status_active")).capitalize(),
+                config_link=base_config_link_display or get_text("config_link_not_available"),
+                traffic_limit=(
+                    _format_bytes_gb(base_active.get("traffic_limit_bytes"), get_text("traffic_unlimited"))
+                    if base_active.get("traffic_limit_bytes")
+                    else get_text("traffic_unlimited")
+                ),
+                traffic_used=_format_bytes_gb(base_active.get("traffic_used_bytes"), get_text("traffic_na")),
+            )
         )
     else:
-        text = get_text(
-            "my_subscription_details",
-            end_date=end_date.strftime("%Y-%m-%d") if end_date else "N/A",
-            days_left=max(0, days_left),
-            status=active.get("status_from_panel", get_text("status_active")).capitalize(),
-            config_link=config_link_value,
-            traffic_limit=(f"{active['traffic_limit_bytes'] / 2**30:.2f} GB" if active.get("traffic_limit_bytes") else get_text("traffic_unlimited")),
-            traffic_used=(
-                f"{active['traffic_used_bytes'] / 2**30:.2f} GB" if active.get("traffic_used_bytes") is not None else get_text("traffic_na")
-            ),
+        text_parts.append(get_text("my_subscription_base_missing"))
+
+    if addon_active:
+        addon_end_date = addon_active.get("end_date")
+        text_parts.append(
+            get_text(
+                "my_subscription_addon_block",
+                status=get_text(_addon_status_key(addon_active.get("addon_state") or addon_active.get("status_from_panel"))),
+                end_date=addon_end_date.strftime("%Y-%m-%d") if addon_end_date else "N/A",
+                included_remaining=_format_bytes_gb(
+                    addon_active.get("included_traffic_remaining_bytes"),
+                    get_text("traffic_na"),
+                ),
+                topup_remaining=_format_bytes_gb(
+                    addon_active.get("addon_topup_remaining_bytes"),
+                    get_text("traffic_na"),
+                ),
+                total_remaining=_format_bytes_gb(
+                    addon_active.get("traffic_remaining_bytes"),
+                    get_text("traffic_na"),
+                ),
+                config_link=addon_config_link_display or get_text("config_link_not_available"),
+            )
         )
+    elif settings.addon_enabled:
+        text_parts.append(get_text("my_subscription_addon_missing"))
+
+    text = "\n\n".join(text_parts)
 
     base_markup = get_back_to_main_menu_markup(current_lang, i18n)
     kb = base_markup.inline_keyboard
     try:
-        local_sub = await subscription_dal.get_active_subscription_by_user_id(session, event.from_user.id)
+        local_sub = await subscription_dal.get_active_subscription_by_user_id(
+            session,
+            event.from_user.id,
+            kind=SUBSCRIPTION_KIND_BASE,
+        )
         # Build rows to prepend above the base "back" markup
         prepend_rows = []
 
-        # 1) Mini-app connect button on top if enabled, otherwise fall back to config link URL
-        if settings.SUBSCRIPTION_MINI_APP_URL:
+        if settings.SUBSCRIPTION_MINI_APP_URL and base_active:
             prepend_rows.append([
                 InlineKeyboardButton(
-                    text=get_text("connect_button"),
+                    text=get_text("connect_base_button"),
                     web_app=WebAppInfo(url=settings.SUBSCRIPTION_MINI_APP_URL),
                 )
             ])
-        else:
-            cfg_link_val = connect_button_url or config_link_display
+        elif base_active:
+            cfg_link_val = base_connect_button_url or base_config_link_display
             if cfg_link_val:
                 prepend_rows.append([
                     InlineKeyboardButton(
-                        text=get_text("connect_button"),
+                        text=get_text("connect_base_button"),
                         url=cfg_link_val,
                     )
                 ])
 
-        if settings.MY_DEVICES_SECTION_ENABLED:
-            max_devices_value = active.get("max_devices")
+        if addon_active:
+            addon_link_val = addon_connect_button_url or addon_config_link_display
+            if addon_link_val:
+                prepend_rows.append([
+                    InlineKeyboardButton(
+                        text=get_text("connect_addon_button"),
+                        url=addon_link_val,
+                    )
+                ])
+
+        if settings.MY_DEVICES_SECTION_ENABLED and base_active:
+            max_devices_value = base_active.get("max_devices")
             max_devices_display = get_text("devices_unlimited_label")
             if max_devices_value not in (None, 0):
                 try:
@@ -282,7 +344,7 @@ async def my_subscription_command_handler(
                 except (TypeError, ValueError):
                     max_devices_display = str(max_devices_value)
             current_devices_display = "?"
-            user_uuid = active.get("user_id")
+            user_uuid = base_active.get("user_id")
             devices_response = None
             if user_uuid:
                 try:
@@ -323,7 +385,7 @@ async def my_subscription_command_handler(
             ])
 
         # 2) Auto-renew toggle (YooKassa only)
-        if not traffic_mode and local_sub and local_sub.provider == "yookassa" and settings.yookassa_autopayments_active:
+        if local_sub and local_sub.provider == "yookassa" and settings.yookassa_autopayments_active:
             toggle_text = (
                 get_text("autorenew_disable_button") if local_sub.auto_renew_enabled else get_text("autorenew_enable_button")
             )
@@ -335,7 +397,7 @@ async def my_subscription_command_handler(
             ])
 
         # 3) Payment methods management (when autopayments enabled)
-        if not traffic_mode and settings.yookassa_autopayments_active:
+        if base_active and settings.yookassa_autopayments_active:
             prepend_rows.append([
                 InlineKeyboardButton(text=get_text("payment_methods_manage_button"), callback_data="pm:manage")
             ])

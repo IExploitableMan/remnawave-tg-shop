@@ -154,6 +154,14 @@ async def show_statistics_handler(callback: types.CallbackQuery,
     stats_text_parts.append(
         f"🏆 {_('admin_financial_all_time_label')}: <b>{financial_stats['all_time_revenue']:.2f} RUB</b>"
     )
+    revenue_by_kind = financial_stats.get("revenue_by_kind") or {}
+    if revenue_by_kind:
+        stats_text_parts.append(
+            "🧩 Base / Add-on / Top-up: "
+            f"<b>{float(revenue_by_kind.get('base_subscription', 0) or 0):.2f}</b> / "
+            f"<b>{float(revenue_by_kind.get('addon_subscription', 0) or 0):.2f}</b> / "
+            f"<b>{float(revenue_by_kind.get('addon_traffic_topup', 0) or 0):.2f}</b> RUB"
+        )
 
     last_payments_models: List[
         Payment] = await payment_dal.get_recent_payment_logs_with_user(session,
@@ -191,7 +199,7 @@ async def show_statistics_handler(callback: types.CallbackQuery,
                 _("admin_stats_payment_item",
                   status_emoji=status_emoji,
                   amount=payment.amount,
-                  currency=payment.currency,
+                  currency=f"{payment.currency} / {payment.kind or 'base_subscription'}",
                   user_info=user_info,
                   p_status=payment.status,
                   p_date=payment_date_str))

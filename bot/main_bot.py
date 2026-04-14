@@ -57,7 +57,18 @@ async def on_startup_configured(dispatcher: Dispatcher):
 
 
     telegram_webhook_url_to_set = settings.WEBHOOK_BASE_URL
-    if telegram_webhook_url_to_set:
+    if settings.TELEGRAM_USE_POLLING:
+        logging.info("STARTUP: Telegram polling mode enabled. Deleting webhook before polling starts.")
+        try:
+            delete_success = await bot.delete_webhook(drop_pending_updates=False)
+            logging.info("STARTUP: bot.delete_webhook returned: %s", delete_success)
+        except Exception as e_delete_webhook:
+            logging.error(
+                "STARTUP: EXCEPTION during delete Telegram webhook before polling: %s",
+                e_delete_webhook,
+                exc_info=True,
+            )
+    elif telegram_webhook_url_to_set:
         full_telegram_webhook_url = settings.telegram_full_webhook_url
         if not full_telegram_webhook_url:
             logging.error(
@@ -103,9 +114,9 @@ async def on_startup_configured(dispatcher: Dispatcher):
             )
     else:
         logging.error(
-            "STARTUP: WEBHOOK_BASE_URL not set in environment. Webhook mode is required. Exiting."
+            "STARTUP: WEBHOOK_BASE_URL not set in environment while webhook mode is enabled. Exiting."
         )
-        raise SystemExit("WEBHOOK_BASE_URL is required. Polling mode is disabled.")
+        raise SystemExit("WEBHOOK_BASE_URL is required when TELEGRAM_USE_POLLING is disabled.")
 
     if settings.SUBSCRIPTION_MINI_APP_URL:
         try:
@@ -293,16 +304,18 @@ async def run_bot(settings_param: Settings):
 
     tg_webhook_base = settings_param.WEBHOOK_BASE_URL
 
-    # Webhook mode is now required - exit if not configured
-    if not tg_webhook_base:
-        logging.error("WEBHOOK_BASE_URL is required. Polling mode is disabled. Exiting.")
+    # Webhook base is only required for Telegram when polling is disabled.
+    if not settings_param.TELEGRAM_USE_POLLING and not tg_webhook_base:
+        logging.error("WEBHOOK_BASE_URL is required when TELEGRAM_USE_POLLING is disabled. Exiting.")
         await dp.emit_shutdown()
-        raise SystemExit("WEBHOOK_BASE_URL is required. Polling mode is disabled.")
+        raise SystemExit("WEBHOOK_BASE_URL is required when TELEGRAM_USE_POLLING is disabled.")
 
     logging.info(f"--- Bot Run Mode Decision ---")
-    logging.info(f"Configured WEBHOOK_BASE_URL: '{tg_webhook_base}' -> Webhook Mode: ENABLED")
+    logging.info(f"Configured WEBHOOK_BASE_URL: '{tg_webhook_base}'")
+    logging.info(f"Configured TELEGRAM_USE_POLLING: {settings_param.TELEGRAM_USE_POLLING}")
     logging.info(f"YooKassa webhook path: '{settings_param.yookassa_webhook_path}'")
-    logging.info(f"Decision: Run AIOHTTP server: ENABLED (required for webhooks)")
+    logging.info(f"Decision: Run AIOHTTP server: ENABLED (provider/panel webhooks)")
+    logging.info(f"Decision: Telegram mode: {'POLLING' if settings_param.TELEGRAM_USE_POLLING else 'WEBHOOK'}")
     logging.info(f"--- End Bot Run Mode Decision ---")
 
     web_app_runner = None
@@ -314,9 +327,21 @@ async def run_bot(settings_param: Settings):
 
     main_tasks.append(asyncio.create_task(web_server_task(), name="AIOHTTPServerTask"))
 
+    if settings_param.TELEGRAM_USE_POLLING:
+        async def telegram_polling_task():
+            await dp.start_polling(
+                bot,
+                allowed_updates=dp.resolve_used_update_types(),
+            )
+
+        main_tasks.append(asyncio.create_task(telegram_polling_task(), name="TelegramPollingTask"))
+
     # Recurring billing moved to panel webhook (24h before expiry). No periodic task needed here.
 
-    logging.info("Starting bot in Webhook mode with AIOHTTP server...")
+    logging.info(
+        "Starting bot with AIOHTTP server and Telegram %s...",
+        "polling" if settings_param.TELEGRAM_USE_POLLING else "webhook mode",
+    )
     logging.info(f"Starting bot with main tasks: {[task.get_name() for task in main_tasks]}")
 
     try:

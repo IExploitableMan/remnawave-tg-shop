@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     )
 
     WEBHOOK_BASE_URL: Optional[str] = None
+    TELEGRAM_USE_POLLING: bool = Field(
+        default=False,
+        description="Use Telegram long polling instead of Telegram webhooks. Other provider webhooks remain enabled.",
+    )
     TELEGRAM_WEBHOOK_PATH: str = Field(
         default="/webhook/telegram",
         description="Relative path for Telegram webhook endpoint",
@@ -838,7 +842,11 @@ def get_settings() -> Settings:
                 logging.warning(
                     "CRITICAL: PANEL_API_URL is not set. Panel integration will not work."
                 )
-            if _settings_instance.WEBHOOK_BASE_URL and not _settings_instance.TELEGRAM_WEBHOOK_SECRET:
+            if (
+                _settings_instance.WEBHOOK_BASE_URL
+                and not _settings_instance.TELEGRAM_USE_POLLING
+                and not _settings_instance.TELEGRAM_WEBHOOK_SECRET
+            ):
                 logging.warning(
                     "WARNING: TELEGRAM_WEBHOOK_SECRET is empty while webhook mode is enabled. "
                     "Set TELEGRAM_WEBHOOK_SECRET to validate X-Telegram-Bot-Api-Secret-Token header."

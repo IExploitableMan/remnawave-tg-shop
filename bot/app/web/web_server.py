@@ -40,7 +40,7 @@ async def build_and_start_web_app(
 
     setup_application(app, dp, bot=bot)
 
-    telegram_uses_webhook_mode = bool(settings.WEBHOOK_BASE_URL)
+    telegram_uses_webhook_mode = bool(settings.WEBHOOK_BASE_URL and not settings.TELEGRAM_USE_POLLING)
     telegram_webhook_secret = (settings.TELEGRAM_WEBHOOK_SECRET or "").strip() or None
 
     if telegram_uses_webhook_mode:

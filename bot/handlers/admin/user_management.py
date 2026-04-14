@@ -1028,7 +1028,7 @@ async def process_admin_add_combined_month_callback(
     _ = lambda key, **kwargs: i18n.gettext(current_lang, key, **kwargs)
 
     try:
-        _, user_id_str, months_str = callback.data.split(":")
+        _prefix, user_id_str, months_str = callback.data.split(":")
         target_user_id = int(user_id_str)
         months = int(months_str)
     except (TypeError, ValueError):

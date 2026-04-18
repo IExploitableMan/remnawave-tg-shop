@@ -83,8 +83,8 @@ async def pay_severpay_callback_handler(
         session=session,
         settings=settings,
         user_id=user_id,
-        months=months,
-        sale_mode=sale_mode,
+        value=months,
+        payment_kind=sale_mode,
         promo_code_service=promo_code_service,
     )
     if resolved_price_rub is None:

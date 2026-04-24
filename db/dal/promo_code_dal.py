@@ -11,7 +11,7 @@ from db.models import PromoCode, PromoCodeActivation, User, Payment
 def _applicability_column_for_payment_kind(payment_kind: Optional[str]):
     normalized = (payment_kind or "base_subscription").strip().lower()
     if normalized == "combined_subscription":
-        return PromoCode.applies_to_addon_subscription
+        return PromoCode.applies_to_combined_subscription
     if normalized == "addon_subscription":
         return PromoCode.applies_to_addon_subscription
     if normalized == "addon_traffic_topup":
@@ -273,6 +273,7 @@ async def record_promo_activation(
     }
     new_activation = PromoCodeActivation(**activation_data)
     session.add(new_activation)
+    promo.last_activated_at = activation_data["activated_at"]
     await session.flush()
     await session.refresh(new_activation)
     logging.info(

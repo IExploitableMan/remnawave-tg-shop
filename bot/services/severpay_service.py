@@ -124,35 +124,25 @@ class SeverPayService:
             active_discount = await active_discount_dal.get_active_discount(
                 session,
                 user_id,
+            )
+            promo_model = await promo_code_service.get_user_active_discount(
+                session,
+                user_id,
                 payment_kind=payment_kind,
             )
-            if active_discount:
-                # Price is already discounted, calculate original price backwards
-                discount_pct = active_discount.discount_percentage
+            if active_discount and promo_model:
+                discount_pct, _promo_code, max_discount_amount, combined_discount_scope = promo_model
                 promo_code_id = active_discount.promo_code_id
-                denominator = 1 - discount_pct / 100
-                if denominator <= 0:
-                    fallback_original = resolve_base_price(self.settings, months, payment_kind, stars=False)
-                    if fallback_original is not None:
-                        original_amount = fallback_original
-                        discount_amount = original_amount - amount
-                        logging.info(
-                            f"Recording {discount_pct}% discount for SeverPay payment: "
-                            f"original {original_amount:.2f} -> final {amount}"
-                        )
-                    else:
-                        logging.warning(
-                            "SeverPay discount %s%% has invalid denominator and no fallback price for months=%s.",
-                            discount_pct,
-                            months,
-                        )
-                else:
-                    original_amount = amount / denominator
-                    discount_amount = original_amount - amount
-                    logging.info(
-                        f"Recording {discount_pct}% discount for SeverPay payment: "
-                        f"original {original_amount:.2f} -> final {amount}"
-                    )
+                price_details = promo_code_service.calculate_discounted_offer_details(
+                    value=months,
+                    payment_kind=payment_kind,
+                    discount_percentage=discount_pct,
+                    max_discount_amount=max_discount_amount,
+                    combined_discount_scope=combined_discount_scope,
+                )
+                if price_details:
+                    original_amount = float(price_details["original_price"])
+                    discount_amount = float(price_details["discount_amount"])
 
                 # Update payment record with discount metadata
                 try:

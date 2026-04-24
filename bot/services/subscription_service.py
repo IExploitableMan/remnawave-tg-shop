@@ -768,6 +768,12 @@ class SubscriptionService:
         promo_model = await promo_code_dal.get_promo_code_by_id(session, promo_code_id)
         if not promo_model or promo_model.promo_type != "bonus_days" or not promo_model.is_active:
             return 0
+        if payment_kind == PAYMENT_KIND_COMBINED_SUBSCRIPTION and not getattr(
+            promo_model,
+            "applies_to_combined_subscription",
+            False,
+        ):
+            return 0
         if payment_kind == PAYMENT_KIND_ADDON_SUBSCRIPTION and not promo_model.applies_to_addon_subscription:
             return 0
         if payment_kind == PAYMENT_KIND_BASE_SUBSCRIPTION and not promo_model.applies_to_base_subscription:
@@ -901,6 +907,25 @@ class SubscriptionService:
             payment_amount=0.0,
             payment_db_id=None,
             provider="admin_manual",
+            sale_mode=PAYMENT_KIND_ADDON_TRAFFIC_TOPUP,
+            traffic_gb=float(traffic_gb),
+            payment_kind=PAYMENT_KIND_ADDON_TRAFFIC_TOPUP,
+        )
+
+    async def grant_addon_topup_via_voucher(
+        self,
+        session: AsyncSession,
+        user_id: int,
+        traffic_gb: float,
+        promo_code: str,
+    ) -> Optional[Dict[str, Any]]:
+        return await self.activate_subscription(
+            session=session,
+            user_id=user_id,
+            months=0,
+            payment_amount=0.0,
+            payment_db_id=None,
+            provider=f"promo_voucher:{promo_code}",
             sale_mode=PAYMENT_KIND_ADDON_TRAFFIC_TOPUP,
             traffic_gb=float(traffic_gb),
             payment_kind=PAYMENT_KIND_ADDON_TRAFFIC_TOPUP,

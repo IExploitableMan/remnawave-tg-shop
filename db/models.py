@@ -50,6 +50,9 @@ class User(Base):
         foreign_keys="MessageLog.target_user_id",
         back_populates="target_user",
         cascade="all, delete-orphan")
+    server_reports = relationship("ServerReport",
+                                  back_populates="user",
+                                  cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<User(user_id={self.user_id}, username='{self.username}')>"
@@ -176,23 +179,34 @@ class PromoCode(Base):
 
     # Type field to distinguish promo code types
     promo_type = Column(String, nullable=False, default="bonus_days", index=True)
-    # Values: "bonus_days" or "discount"
+    # Values: "bonus_days", "discount", or "traffic_gb"
 
     # For bonus_days type: number of days to add to subscription
     bonus_days = Column(Integer, nullable=True)
 
     # For discount type: percentage discount (1-100)
     discount_percentage = Column(Integer, nullable=True)
+    max_discount_amount = Column(Float, nullable=True)
+
+    # For traffic_gb type: gifted add-on traffic amount in GB
+    traffic_amount_gb = Column(Float, nullable=True)
 
     max_activations = Column(Integer, nullable=False)
     current_activations = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
     created_by_admin_id = Column(BigInteger, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_activated_at = Column(DateTime(timezone=True), nullable=True)
     valid_until = Column(DateTime(timezone=True), nullable=True)
+    min_user_registration_date = Column(DateTime(timezone=True), nullable=True)
+    registration_date_direction = Column(String, nullable=False, default="after")
+    renewal_only = Column(Boolean, nullable=False, default=False)
+    subscription_presence_mode = Column(String, nullable=False, default="any")
     applies_to_base_subscription = Column(Boolean, nullable=False, default=True)
+    applies_to_combined_subscription = Column(Boolean, nullable=False, default=False)
     applies_to_addon_subscription = Column(Boolean, nullable=False, default=False)
     applies_to_addon_traffic_topup = Column(Boolean, nullable=False, default=False)
+    combined_discount_scope = Column(String, nullable=False, default="base_only")
 
     activations = relationship("PromoCodeActivation",
                                back_populates="promo_code",
@@ -274,6 +288,51 @@ class AddonTrafficTopUp(Base):
     user = relationship("User")
     subscription = relationship("Subscription", back_populates="addon_traffic_topups")
     payment = relationship("Payment")
+
+
+class ServerReport(Base):
+    __tablename__ = "server_reports"
+
+    report_id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(BigInteger, ForeignKey("users.user_id"), nullable=False, index=True)
+    issue_type = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=False, default="new", index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    user = relationship("User", back_populates="server_reports")
+    hosts = relationship(
+        "ServerReportHost",
+        back_populates="report",
+        cascade="all, delete-orphan",
+    )
+
+
+class ServerReportHost(Base):
+    __tablename__ = "server_report_hosts"
+
+    report_host_id = Column(Integer, primary_key=True, autoincrement=True)
+    report_id = Column(
+        Integer,
+        ForeignKey("server_reports.report_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    host_uuid = Column(String, nullable=False, index=True)
+    host_name = Column(String, nullable=False)
+    host_address = Column(String, nullable=True)
+    node_uuid = Column(String, nullable=True, index=True)
+    node_name = Column(String, nullable=True)
+    profile_kind = Column(String, nullable=True)
+
+    report = relationship("ServerReport", back_populates="hosts")
+
+
+class AdminServerReportPreference(Base):
+    __tablename__ = "admin_server_report_preferences"
+
+    admin_id = Column(BigInteger, primary_key=True, index=True)
+    reports_enabled = Column(Boolean, nullable=False, default=True, index=True)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
 
 
 class MessageLog(Base):

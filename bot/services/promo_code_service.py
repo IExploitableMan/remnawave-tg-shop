@@ -13,6 +13,14 @@ from db.dal import promo_code_dal, user_dal, active_discount_dal, payment_dal
 from .subscription_service import SubscriptionService
 from bot.middlewares.i18n import JsonI18n
 from .notification_service import NotificationService
+from bot.utils.product_kinds import (
+    PAYMENT_KIND_ADDON_SUBSCRIPTION,
+    PAYMENT_KIND_ADDON_TRAFFIC_TOPUP,
+    PAYMENT_KIND_BASE_SUBSCRIPTION,
+    PAYMENT_KIND_COMBINED_SUBSCRIPTION,
+    normalize_payment_kind,
+)
+from bot.utils.product_offers import resolve_base_price
 
 
 class PromoCodeService:
@@ -58,6 +66,127 @@ class PromoCodeService:
             logging.exception("PromoCodeService: failed while stopping expiration worker")
         finally:
             self._discount_expiration_task = None
+
+    async def _validate_promo_constraints(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: int,
+        promo_data,
+        user_lang: str,
+        payment_kind: str = "base_subscription",
+    ) -> Optional[str]:
+        _ = lambda k, **kw: self.i18n.gettext(user_lang, k, **kw)
+        db_user = await user_dal.get_user_by_id(session, user_id)
+        if not db_user:
+            return _("error_occurred_try_again")
+
+        min_registration_date = getattr(promo_data, "min_user_registration_date", None)
+        registration_direction = getattr(promo_data, "registration_date_direction", "after") or "after"
+        if min_registration_date and db_user.registration_date:
+            if registration_direction == "before" and db_user.registration_date > min_registration_date:
+                return _(
+                    "promo_code_user_registered_too_late",
+                    code=promo_data.code,
+                    required_date=min_registration_date.strftime("%Y-%m-%d"),
+                )
+            if registration_direction != "before" and db_user.registration_date < min_registration_date:
+                return _(
+                    "promo_code_user_registered_too_early",
+                    code=promo_data.code,
+                    required_date=min_registration_date.strftime("%Y-%m-%d"),
+                )
+
+        requires_addon = normalize_payment_kind(payment_kind) in {
+                PAYMENT_KIND_ADDON_SUBSCRIPTION,
+                PAYMENT_KIND_ADDON_TRAFFIC_TOPUP,
+        }
+        required_kind = "addon" if requires_addon else "base"
+        has_active_required_subscription = await self.subscription_service.has_active_subscription(
+            session,
+            user_id,
+            kind=required_kind,
+        )
+
+        subscription_presence_mode = getattr(
+            promo_data,
+            "subscription_presence_mode",
+            "active_only" if getattr(promo_data, "renewal_only", False) else "any",
+        ) or "any"
+        if subscription_presence_mode == "active_only":
+            if not has_active_required_subscription:
+                return _("promo_code_only_for_renewal", code=promo_data.code)
+        elif subscription_presence_mode == "inactive_only" and has_active_required_subscription:
+            return _("promo_code_only_without_active_subscription", code=promo_data.code)
+
+        return None
+
+    @staticmethod
+    def _promo_applies_to_payment_kind(promo, payment_kind: str) -> bool:
+        normalized = normalize_payment_kind(payment_kind)
+        if normalized == PAYMENT_KIND_COMBINED_SUBSCRIPTION:
+            return bool(getattr(promo, "applies_to_combined_subscription", False))
+        if normalized == PAYMENT_KIND_ADDON_SUBSCRIPTION:
+            return bool(getattr(promo, "applies_to_addon_subscription", False))
+        if normalized == PAYMENT_KIND_ADDON_TRAFFIC_TOPUP:
+            return bool(getattr(promo, "applies_to_addon_traffic_topup", False))
+        return bool(getattr(promo, "applies_to_base_subscription", False))
+
+    def calculate_discounted_offer_details(
+        self,
+        *,
+        value: float,
+        payment_kind: str,
+        discount_percentage: int,
+        max_discount_amount: Optional[float] = None,
+        combined_discount_scope: str = "base_only",
+        stars: bool = False,
+    ) -> Optional[dict[str, float | bool | str]]:
+        normalized_payment_kind = normalize_payment_kind(payment_kind)
+        original_price = resolve_base_price(
+            self.settings,
+            value,
+            normalized_payment_kind,
+            stars=stars,
+        )
+        if original_price is None:
+            return None
+
+        original_price_float = float(original_price)
+        discountable_price = original_price_float
+        discount_scope_applied = "full"
+        if normalized_payment_kind == PAYMENT_KIND_COMBINED_SUBSCRIPTION and combined_discount_scope == "base_only":
+            base_component_price = resolve_base_price(
+                self.settings,
+                value,
+                PAYMENT_KIND_BASE_SUBSCRIPTION,
+                stars=stars,
+            )
+            if base_component_price is not None:
+                discountable_price = min(float(base_component_price), original_price_float)
+                discount_scope_applied = "base_only"
+
+        raw_discount_amount = round(discountable_price * (discount_percentage / 100), 2)
+        discount_amount = raw_discount_amount
+        cap_applied = False
+        if max_discount_amount is not None:
+            capped_discount_amount = round(float(max_discount_amount), 2)
+            if discount_amount > capped_discount_amount:
+                discount_amount = capped_discount_amount
+                cap_applied = True
+
+        final_price = round(original_price_float - discount_amount, 2)
+        if final_price < 0:
+            discount_amount = original_price_float
+            final_price = 0.0
+
+        return {
+            "original_price": original_price_float,
+            "final_price": final_price,
+            "discount_amount": round(discount_amount, 2),
+            "cap_applied": cap_applied,
+            "discount_scope_applied": discount_scope_applied,
+        }
 
     async def _discount_expiration_loop(self) -> None:
         """Periodically clears expired discount reservations and notifies users."""
@@ -152,10 +281,22 @@ class PromoCodeService:
         code_input_upper = code_input.strip().upper()
 
         promo_data = await promo_code_dal.get_active_bonus_promo_code_by_code_str(
-            session, code_input_upper)
+            session,
+            code_input_upper,
+        )
 
         if not promo_data:
             return False, _("promo_code_not_found", code=code_input_upper)
+
+        constraint_error = await self._validate_promo_constraints(
+            session,
+            user_id=user_id,
+            promo_data=promo_data,
+            user_lang=user_lang,
+            payment_kind="base_subscription",
+        )
+        if constraint_error:
+            return False, constraint_error
 
         existing_activation = await promo_code_dal.get_user_activation_for_promo(
             session, promo_data.promo_code_id, user_id)
@@ -201,6 +342,85 @@ class PromoCodeService:
         else:
             return False, _("error_applying_promo_bonus")
 
+    async def apply_traffic_voucher_code(
+        self,
+        session: AsyncSession,
+        user_id: int,
+        code_input: str,
+        user_lang: str,
+    ) -> Tuple[bool, dict[str, object] | str]:
+        _ = lambda k, **kw: self.i18n.gettext(user_lang, k, **kw)
+        code_input_upper = code_input.strip().upper()
+
+        promo_data = await promo_code_dal.get_promo_code_by_code(session, code_input_upper)
+        if not promo_data or promo_data.promo_type != "traffic_gb" or not promo_data.is_active:
+            return False, _("promo_code_not_found", code=code_input_upper)
+
+        if promo_data.current_activations >= promo_data.max_activations:
+            return False, _("promo_code_not_found", code=code_input_upper)
+
+        if promo_data.valid_until and promo_data.valid_until <= datetime.now(timezone.utc):
+            return False, _("promo_code_not_found", code=code_input_upper)
+
+        constraint_error = await self._validate_promo_constraints(
+            session,
+            user_id=user_id,
+            promo_data=promo_data,
+            user_lang=user_lang,
+            payment_kind=PAYMENT_KIND_ADDON_TRAFFIC_TOPUP,
+        )
+        if constraint_error:
+            return False, constraint_error
+
+        existing_activation = await promo_code_dal.get_user_activation_for_promo(
+            session,
+            promo_data.promo_code_id,
+            user_id,
+        )
+        if existing_activation:
+            return False, _("promo_code_already_used_by_user", code=code_input_upper)
+
+        traffic_gb = float(promo_data.traffic_amount_gb or 0)
+        if traffic_gb <= 0:
+            return False, _("error_occurred_try_again")
+
+        activation = await self.subscription_service.grant_addon_topup_via_voucher(
+            session=session,
+            user_id=user_id,
+            traffic_gb=traffic_gb,
+            promo_code=code_input_upper,
+        )
+        if not activation:
+            return False, _("traffic_voucher_requires_active_addon", code=code_input_upper)
+
+        activation_recorded = await promo_code_dal.record_promo_activation(
+            session,
+            promo_data.promo_code_id,
+            user_id,
+            payment_id=None,
+        )
+        promo_incremented = await promo_code_dal.increment_promo_code_usage(
+            session,
+            promo_data.promo_code_id,
+        )
+        if not activation_recorded or not promo_incremented:
+            return False, _("error_occurred_try_again")
+
+        try:
+            notification_service = NotificationService(self.bot, self.settings, self.i18n)
+            user = await user_dal.get_user_by_id(session, user_id)
+            await notification_service.notify_traffic_voucher_activation(
+                user_id=user_id,
+                promo_code=code_input_upper,
+                traffic_gb=traffic_gb,
+                username=user.username if user else None,
+            )
+        except Exception as e:
+            logging.error("Failed to send traffic voucher activation notification: %s", e)
+
+        activation["traffic_gb"] = traffic_gb
+        return True, activation
+
     async def apply_discount_promo_code(
         self,
         session: AsyncSession,
@@ -221,7 +441,6 @@ class PromoCodeService:
             session,
             user_id,
             include_expired=True,
-            payment_kind=payment_kind,
         )
         if existing_discount:
             now_utc = datetime.now(timezone.utc)
@@ -230,7 +449,6 @@ class PromoCodeService:
                     session,
                     user_id,
                     now=now_utc,
-                    payment_kind=payment_kind,
                 )
                 if cleared:
                     await promo_code_dal.decrement_promo_code_usage(
@@ -250,7 +468,7 @@ class PromoCodeService:
                                discount_pct=existing_discount.discount_percentage)
             else:
                 # Existing discount but promo not found - clear it and continue
-                await active_discount_dal.clear_active_discount(session, user_id, payment_kind=payment_kind)
+                await active_discount_dal.clear_active_discount(session, user_id)
 
         # Get discount promo code
         promo_data = await promo_code_dal.get_active_discount_promo_code_by_code_str(
@@ -259,6 +477,16 @@ class PromoCodeService:
 
         if not promo_data:
             return False, _("promo_code_not_found_or_not_discount", code=code_input_upper)
+
+        constraint_error = await self._validate_promo_constraints(
+            session,
+            user_id=user_id,
+            promo_data=promo_data,
+            user_lang=user_lang,
+            payment_kind=payment_kind,
+        )
+        if constraint_error:
+            return False, constraint_error
 
         # Check if user already used this code
         existing_activation = await promo_code_dal.get_user_activation_for_promo(
@@ -308,16 +536,15 @@ class PromoCodeService:
         session: AsyncSession,
         user_id: int,
         payment_kind: str = "base_subscription",
-    ) -> Optional[Tuple[int, str]]:
+    ) -> Optional[Tuple[int, str, Optional[float], str]]:
         """
         Get user's active discount if any.
-        Returns: (discount_percentage, promo_code) or None
+        Returns: (discount_percentage, promo_code, max_discount_amount, combined_discount_scope) or None
         """
         active_discount = await active_discount_dal.get_active_discount(
             session,
             user_id,
             include_expired=True,
-            payment_kind=payment_kind,
         )
         if not active_discount:
             return None
@@ -328,7 +555,6 @@ class PromoCodeService:
                 session,
                 user_id,
                 now=now_utc,
-                payment_kind=payment_kind,
             )
             if cleared:
                 await promo_code_dal.decrement_promo_code_usage(
@@ -343,7 +569,7 @@ class PromoCodeService:
         )
         if not promo:
             # Discount exists but promo not found - clear it
-            await active_discount_dal.clear_active_discount(session, user_id, payment_kind=payment_kind)
+            await active_discount_dal.clear_active_discount(session, user_id)
             return None
 
         # Check if promo code has expired
@@ -353,23 +579,34 @@ class PromoCodeService:
                 f"Promo code {promo.code} expired (valid_until: {promo.valid_until}). "
                 f"Clearing active discount for user {user_id}"
             )
-            cleared = await active_discount_dal.clear_active_discount(session, user_id, payment_kind=payment_kind)
+            cleared = await active_discount_dal.clear_active_discount(session, user_id)
             if cleared:
                 await promo_code_dal.decrement_promo_code_usage(session, promo.promo_code_id)
             return None
 
-        return (active_discount.discount_percentage, promo.code)
+        if not self._promo_applies_to_payment_kind(promo, payment_kind):
+            return None
+
+        return (
+            active_discount.discount_percentage,
+            promo.code,
+            getattr(promo, "max_discount_amount", None),
+            getattr(promo, "combined_discount_scope", "base_only") or "base_only",
+        )
 
     def calculate_discounted_price(
         self,
         original_price: float,
-        discount_percentage: int
+        discount_percentage: int,
+        max_discount_amount: Optional[float] = None,
     ) -> Tuple[float, float]:
         """
         Calculate discounted price and discount amount.
         Returns: (final_price, discount_amount)
         """
         discount_amount = round(original_price * (discount_percentage / 100), 2)
+        if max_discount_amount is not None:
+            discount_amount = min(discount_amount, round(float(max_discount_amount), 2))
         final_price = round(original_price - discount_amount, 2)
 
         # Ensure price doesn't go negative
@@ -451,7 +688,6 @@ class PromoCodeService:
             session,
             user_id,
             include_expired=True,
-            payment_kind=payment_kind or payment_record.kind,
         )
 
         # Reservation is best-effort cleanup at this point; payment success already happened.
@@ -460,7 +696,6 @@ class PromoCodeService:
                 session,
                 user_id=user_id,
                 promo_code_id=promo_code_id,
-                payment_kind=payment_kind or payment_record.kind,
             )
         elif active_discount and active_discount.promo_code_id != promo_code_id:
             logging.info(

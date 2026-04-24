@@ -317,6 +317,35 @@ class NotificationService:
         # Send to log channel
         profile_keyboard = self._build_profile_keyboard(_, user_id)
         await self._send_to_log_channel(message, reply_markup=profile_keyboard)
+
+    async def notify_traffic_voucher_activation(
+        self,
+        user_id: int,
+        promo_code: str,
+        traffic_gb: float,
+        username: Optional[str] = None,
+    ):
+        if not self.settings.LOG_PROMO_ACTIVATIONS:
+            return
+
+        admin_lang = self.settings.DEFAULT_LANGUAGE
+        _ = lambda k, **kw: self.i18n.gettext(admin_lang, k, **kw) if self.i18n else k
+
+        user_display = self._format_user_display(
+            user_id=user_id,
+            username=username,
+        )
+
+        message = _(
+            "log_promo_traffic_activation",
+            user_display=user_display,
+            promo_code=promo_code,
+            traffic_gb=f"{float(traffic_gb):g}",
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+
+        profile_keyboard = self._build_profile_keyboard(_, user_id)
+        await self._send_to_log_channel(message, reply_markup=profile_keyboard)
     
     async def notify_trial_activation(self, user_id: int, end_date: datetime,
                                     username: Optional[str] = None):

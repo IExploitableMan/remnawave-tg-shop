@@ -193,6 +193,58 @@ def _run_legacy_migrator_compatibility(connection: Connection) -> None:
             connection.execute(
                 text("ALTER TABLE promo_codes ALTER COLUMN bonus_days DROP NOT NULL")
             )
+        if "max_discount_amount" not in promo_columns:
+            connection.execute(
+                text("ALTER TABLE promo_codes ADD COLUMN max_discount_amount FLOAT")
+            )
+        if "traffic_amount_gb" not in promo_columns:
+            connection.execute(
+                text("ALTER TABLE promo_codes ADD COLUMN traffic_amount_gb FLOAT")
+            )
+        if "min_user_registration_date" not in promo_columns:
+            connection.execute(
+                text("ALTER TABLE promo_codes ADD COLUMN min_user_registration_date TIMESTAMPTZ")
+            )
+        if "registration_date_direction" not in promo_columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE promo_codes ADD COLUMN registration_date_direction VARCHAR NOT NULL DEFAULT 'after'"
+                )
+            )
+        if "renewal_only" not in promo_columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE promo_codes ADD COLUMN renewal_only BOOLEAN NOT NULL DEFAULT FALSE"
+                )
+            )
+        if "subscription_presence_mode" not in promo_columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE promo_codes ADD COLUMN subscription_presence_mode VARCHAR NOT NULL DEFAULT 'any'"
+                )
+            )
+        if "applies_to_combined_subscription" not in promo_columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE promo_codes ADD COLUMN applies_to_combined_subscription BOOLEAN NOT NULL DEFAULT FALSE"
+                )
+            )
+        if "combined_discount_scope" not in promo_columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE promo_codes ADD COLUMN combined_discount_scope VARCHAR NOT NULL DEFAULT 'base_only'"
+                )
+            )
+        if "last_activated_at" not in promo_columns:
+            connection.execute(
+                text("ALTER TABLE promo_codes ADD COLUMN last_activated_at TIMESTAMPTZ")
+            )
+        connection.execute(
+            text(
+                "UPDATE promo_codes SET subscription_presence_mode = 'active_only' "
+                "WHERE renewal_only = TRUE AND subscription_presence_mode = 'any'"
+            )
+        )
         connection.execute(
             text(
                 "CREATE INDEX IF NOT EXISTS idx_promo_codes_promo_type ON promo_codes (promo_type)"
@@ -216,6 +268,68 @@ def _run_legacy_migrator_compatibility(connection: Connection) -> None:
                         FOREIGN KEY (promo_code_id) REFERENCES promo_codes (promo_code_id) ON DELETE CASCADE
                 )
                 """
+            )
+        )
+
+    db_inspector = inspect(connection)
+    if db_inspector.has_table("users") and not db_inspector.has_table("server_reports"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS server_reports (
+                    report_id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(user_id),
+                    issue_type VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL DEFAULT 'new',
+                    created_at TIMESTAMPTZ DEFAULT now()
+                )
+                """
+            )
+        )
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_server_reports_user_id ON server_reports (user_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_server_reports_issue_type ON server_reports (issue_type)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_server_reports_status ON server_reports (status)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_server_reports_created_at ON server_reports (created_at)"))
+
+    db_inspector = inspect(connection)
+    if db_inspector.has_table("server_reports") and not db_inspector.has_table("server_report_hosts"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS server_report_hosts (
+                    report_host_id SERIAL PRIMARY KEY,
+                    report_id INTEGER NOT NULL REFERENCES server_reports(report_id) ON DELETE CASCADE,
+                    host_uuid VARCHAR NOT NULL,
+                    host_name VARCHAR NOT NULL,
+                    host_address VARCHAR,
+                    node_uuid VARCHAR,
+                    node_name VARCHAR,
+                    profile_kind VARCHAR
+                )
+                """
+            )
+        )
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_server_report_hosts_report_id ON server_report_hosts (report_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_server_report_hosts_host_uuid ON server_report_hosts (host_uuid)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_server_report_hosts_node_uuid ON server_report_hosts (node_uuid)"))
+
+    db_inspector = inspect(connection)
+    if not db_inspector.has_table("admin_server_report_preferences"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS admin_server_report_preferences (
+                    admin_id BIGINT PRIMARY KEY,
+                    reports_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    updated_at TIMESTAMPTZ
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_admin_server_report_preferences_reports_enabled "
+                "ON admin_server_report_preferences (reports_enabled)"
             )
         )
         has_active_discounts = True

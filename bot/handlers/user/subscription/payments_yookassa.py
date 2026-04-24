@@ -108,35 +108,25 @@ async def _initiate_yk_payment(
         active_discount = await active_discount_dal.get_active_discount(
             session,
             user_id,
+        )
+        promo_model = await promo_code_service.get_user_active_discount(
+            session,
+            user_id,
             payment_kind=sale_mode,
         )
-        if active_discount:
-            # Price is already discounted, calculate original price backwards
-            discount_pct = active_discount.discount_percentage
+        if active_discount and promo_model:
+            discount_pct, _promo_code, max_discount_amount, combined_discount_scope = promo_model
             active_promo_code_id = active_discount.promo_code_id
-            denominator = 1 - discount_pct / 100
-            if denominator <= 0:
-                fallback_original = resolve_base_price(settings, months, sale_mode, stars=False)
-                if fallback_original is not None:
-                    original_price = fallback_original
-                    discount_amount = original_price - price_rub
-                    logging.info(
-                        f"Recording {discount_pct}% discount for YooKassa payment: "
-                        f"original {original_price:.2f} -> final {price_rub}"
-                    )
-                else:
-                    logging.warning(
-                        "YooKassa discount %s%% has invalid denominator and no fallback price for months=%s.",
-                        discount_pct,
-                        months,
-                    )
-            else:
-                original_price = price_rub / denominator
-                discount_amount = original_price - price_rub
-                logging.info(
-                    f"Recording {discount_pct}% discount for YooKassa payment: "
-                    f"original {original_price:.2f} -> final {price_rub}"
-                )
+            price_details = promo_code_service.calculate_discounted_offer_details(
+                value=months,
+                payment_kind=sale_mode,
+                discount_percentage=discount_pct,
+                max_discount_amount=max_discount_amount,
+                combined_discount_scope=combined_discount_scope,
+            )
+            if price_details:
+                original_price = float(price_details["original_price"])
+                discount_amount = float(price_details["discount_amount"])
 
     payment_description = get_payment_description(get_text, months, sale_mode)
     payment_record_data = {

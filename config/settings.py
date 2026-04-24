@@ -266,6 +266,10 @@ class Settings(BaseSettings):
         default=False,
         description="Enable the My Devices section in the subscription menu"
     )
+    SERVER_REPORT_COOLDOWN_HOURS: int = Field(
+        default=24,
+        description="Minimum interval between server reports from one user",
+    )
     USER_HWID_DEVICE_LIMIT: Optional[int] = Field(
         default=None,
         description="Default hardware device limit for panel users (0 = unlimited)"

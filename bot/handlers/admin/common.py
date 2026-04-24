@@ -24,6 +24,7 @@ from . import user_management as admin_user_mgmnt_handlers
 from . import statistics as admin_stats_handlers
 from . import sync_admin as admin_sync_handlers
 from . import logs_admin as admin_logs_handlers
+from . import server_reports as admin_server_reports_handlers
 
 router = Router(name="admin_common_router")
 
@@ -140,6 +141,9 @@ async def admin_panel_actions_callback_handler(
     elif action == "view_payments":
         from . import payments as admin_payments_handlers
         await admin_payments_handlers.view_payments_handler(
+            callback, i18n_data, settings, session)
+    elif action == "server_reports":
+        await admin_server_reports_handlers.show_server_reports_handler(
             callback, i18n_data, settings, session)
     elif action == "ads":
         from . import ads as admin_ads_handlers

@@ -359,7 +359,18 @@ async def create_bulk_promo_codes_final(callback_or_message,
                     "current_activations": 0,
                     "is_active": True,
                     "created_by_admin_id": callback_or_message.from_user.id,
-                    "created_at": datetime.now(timezone.utc)
+                    "created_at": datetime.now(timezone.utc),
+                    "max_discount_amount": None,
+                    "min_user_registration_date": None,
+                    "renewal_only": False,
+                    "registration_date_direction": "after",
+                    "subscription_presence_mode": "any",
+                    "applies_to_base_subscription": True,
+                    "applies_to_combined_subscription": False,
+                    "applies_to_addon_subscription": False,
+                    "applies_to_addon_traffic_topup": False,
+                    "combined_discount_scope": "base_only",
+                    "last_activated_at": None,
                 }
                 
                 # Set validity

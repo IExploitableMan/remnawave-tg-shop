@@ -45,12 +45,14 @@ def get_stats_monitoring_keyboard(i18n_instance, lang: str) -> InlineKeyboardMar
                    callback_data="admin_action:stats")
     builder.button(text=_(key="admin_view_payments_button"),
                    callback_data="admin_action:view_payments")
+    builder.button(text=_(key="admin_server_reports_button"),
+                   callback_data="admin_action:server_reports")
     builder.button(text=_(key="admin_view_logs_menu_button"),
                    callback_data="admin_action:view_logs_menu")
     
     builder.button(text=_(key="back_to_admin_panel_button"),
                    callback_data="admin_action:main")
-    builder.adjust(2, 1, 1)
+    builder.adjust(2, 2, 1)
     return builder.as_markup()
 
 

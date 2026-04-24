@@ -7,6 +7,7 @@ from . import message_log_dal
 from . import user_billing_dal
 from . import ad_dal
 from . import addon_traffic_dal
+from . import server_report_dal
 
 __all__ = (
     "user_dal",
@@ -18,5 +19,5 @@ __all__ = (
     "user_billing_dal",
     "ad_dal",
     "addon_traffic_dal",
+    "server_report_dal",
 )
-

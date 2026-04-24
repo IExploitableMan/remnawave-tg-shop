@@ -74,7 +74,13 @@ class StarsService:
 
             # Apply discount and round up using ceiling
             final_price_float, discount_float, promo_code_id = await apply_discount_to_payment(
-                session, user_id, float(original_stars_price), promo_code_service, payment_kind=sale_mode
+                session,
+                user_id,
+                float(original_stars_price),
+                promo_code_service,
+                payment_kind=sale_mode,
+                offer_value=months,
+                stars=True,
             )
             if discount_float:
                 stars_price = math.ceil(final_price_float)

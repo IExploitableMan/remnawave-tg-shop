@@ -24,11 +24,54 @@ def _promo_scope_text(promo: PromoCode, i18n: JsonI18n, current_lang: str) -> st
     labels = []
     if promo.applies_to_base_subscription:
         labels.append(_("admin_promo_scope_short_base"))
+    if getattr(promo, "applies_to_combined_subscription", False):
+        labels.append(_("admin_promo_scope_short_combined"))
     if promo.applies_to_addon_subscription:
         labels.append(_("admin_promo_scope_short_addon"))
     if promo.applies_to_addon_traffic_topup:
         labels.append(_("admin_promo_scope_short_topup"))
     return ", ".join(labels) if labels else _("admin_promo_scope_short_none")
+
+
+def _promo_yes_no(value: bool, i18n: JsonI18n, current_lang: str) -> str:
+    _ = lambda key, **kwargs: i18n.gettext(current_lang, key, **kwargs)
+    return _("admin_promo_yes") if value else _("admin_promo_no")
+
+
+def _promo_subscription_presence_text(promo: PromoCode, i18n: JsonI18n, current_lang: str) -> str:
+    _ = lambda key, **kwargs: i18n.gettext(current_lang, key, **kwargs)
+    mode = getattr(
+        promo,
+        "subscription_presence_mode",
+        "active_only" if getattr(promo, "renewal_only", False) else "any",
+    ) or "any"
+    mapping = {
+        "any": _("admin_promo_presence_any"),
+        "active_only": _("admin_promo_presence_active_only"),
+        "inactive_only": _("admin_promo_presence_inactive_only"),
+    }
+    return mapping.get(mode, _("admin_promo_presence_any"))
+
+
+def _promo_registration_rule_text(promo: PromoCode, i18n: JsonI18n, current_lang: str) -> str:
+    _ = lambda key, **kwargs: i18n.gettext(current_lang, key, **kwargs)
+    registration_date = promo.min_user_registration_date
+    if not registration_date:
+        return _("admin_promo_unlimited")
+    direction = getattr(promo, "registration_date_direction", "after") or "after"
+    if direction == "before":
+        return _("admin_promo_registration_rule_before_value", value=registration_date.strftime("%Y-%m-%d"))
+    return _("admin_promo_registration_rule_after_value", value=registration_date.strftime("%Y-%m-%d"))
+
+
+def _promo_combined_discount_scope_text(promo: PromoCode, i18n: JsonI18n, current_lang: str) -> str:
+    _ = lambda key, **kwargs: i18n.gettext(current_lang, key, **kwargs)
+    scope = getattr(promo, "combined_discount_scope", "base_only") or "base_only"
+    mapping = {
+        "base_only": _("admin_promo_combined_discount_base_only"),
+        "full": _("admin_promo_combined_discount_full"),
+    }
+    return mapping.get(scope, _("admin_promo_combined_discount_base_only"))
 
 
 def get_promo_status_emoji_and_text(promo: PromoCode, i18n: JsonI18n, current_lang: str):
@@ -64,21 +107,46 @@ async def get_promo_detail_text_and_keyboard(promo_id: int, session: AsyncSessio
     if promo_type == "discount":
         type_name = _("admin_promo_type_discount")
         value_line = _("admin_promo_card_discount_percentage", percentage=promo.discount_percentage)
+        discount_cap_line = _("admin_promo_card_discount_cap", value=(
+            _("admin_promo_unlimited") if promo.max_discount_amount is None else promo.max_discount_amount
+        ))
+    elif promo_type == "traffic_gb":
+        type_name = _("admin_promo_type_traffic_voucher")
+        value_line = _("admin_promo_card_traffic_gb", traffic_gb=f"{float(promo.traffic_amount_gb or 0):g}")
+        discount_cap_line = None
     else:
         type_name = _("admin_promo_type_bonus_days")
         value_line = _("admin_promo_card_bonus_days", days=promo.bonus_days)
+        discount_cap_line = None
 
-    text = "\n".join([
+    lines = [
         _("admin_promo_card_title", code=promo.code),
         _("admin_promo_card_type", type=type_name),
         value_line,
+    ]
+    if discount_cap_line:
+        lines.append(discount_cap_line)
+    lines.extend([
         _("admin_promo_card_activations", current=promo.current_activations, max=promo.max_activations),
         _("admin_promo_card_scope", scope=_promo_scope_text(promo, i18n, current_lang)),
+        _("admin_promo_card_registration_rule", value=_promo_registration_rule_text(promo, i18n, current_lang)),
+        _("admin_promo_card_subscription_presence", value=_promo_subscription_presence_text(promo, i18n, current_lang)),
         _("admin_promo_card_validity", validity=validity),
         _("admin_promo_card_status", status=status),
         _("admin_promo_card_created", created=created),
-        _("admin_promo_card_created_by", creator=promo.created_by_admin_id)
+        _("admin_promo_card_created_by", creator=promo.created_by_admin_id),
+        _("admin_promo_card_last_activated", value=(
+            promo.last_activated_at.strftime("%d.%m.%Y %H:%M")
+            if getattr(promo, "last_activated_at", None)
+            else _("admin_promo_unlimited")
+        )),
     ])
+    if promo_type == "discount" and getattr(promo, "applies_to_combined_subscription", False):
+        lines.insert(
+            5 if discount_cap_line else 4,
+            _("admin_promo_card_combined_discount_scope", value=_promo_combined_discount_scope_text(promo, i18n, current_lang)),
+        )
+    text = "\n".join(lines)
 
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text=_("admin_promo_edit_button"), callback_data=f"promo_edit_select:{promo_id}"))
@@ -108,6 +176,8 @@ async def view_promo_codes_handler(callback: types.CallbackQuery, i18n_data: dic
             promo_type = getattr(p, "promo_type", "bonus_days")
             if promo_type == "discount":
                 value_display = f"💰 {p.discount_percentage}%"
+            elif promo_type == "traffic_gb":
+                value_display = f"📦 {float(p.traffic_amount_gb or 0):g} GB"
             else:
                 value_display = f"🎁 {p.bonus_days}д"
             validity_display = p.valid_until.strftime('%d.%m.%Y') if p.valid_until else _('admin_promo_valid_indefinitely')
@@ -337,11 +407,17 @@ async def promo_export_all_handler(callback: types.CallbackQuery, i18n_data: dic
             "Scope",
             i18n.gettext(export_lang, "admin_promo_csv_bonus_days"),
             "Discount %",
+            "Traffic GB",
+            "Max Discount Amount",
+            "Combined Discount Scope",
             i18n.gettext(export_lang, "admin_promo_csv_max_activations"),
             i18n.gettext(export_lang, "admin_promo_csv_current_activations"),
             i18n.gettext(export_lang, "admin_promo_csv_status"),
             i18n.gettext(export_lang, "admin_promo_csv_is_active"),
             i18n.gettext(export_lang, "admin_promo_csv_valid_until"),
+            "Registration Rule",
+            "Subscription Presence",
+            "Last Activated At",
             i18n.gettext(export_lang, "admin_promo_csv_created_at"),
             i18n.gettext(export_lang, "admin_promo_csv_created_by_admin_id"),
         ])
@@ -354,6 +430,7 @@ async def promo_export_all_handler(callback: types.CallbackQuery, i18n_data: dic
             promo_type = getattr(promo, "promo_type", "bonus_days")
             bonus_days_val = promo.bonus_days if promo_type == "bonus_days" else "N/A"
             discount_val = promo.discount_percentage if promo_type == "discount" else "N/A"
+            traffic_gb_val = promo.traffic_amount_gb if promo_type == "traffic_gb" else "N/A"
 
             # Формируем данные для CSV
             row = [
@@ -362,11 +439,17 @@ async def promo_export_all_handler(callback: types.CallbackQuery, i18n_data: dic
                 _promo_scope_text(promo, i18n, export_lang),
                 bonus_days_val,
                 discount_val,
+                traffic_gb_val,
+                promo.max_discount_amount if promo.max_discount_amount is not None else "",
+                getattr(promo, "combined_discount_scope", "base_only"),
                 promo.max_activations,
                 promo.current_activations,
                 status_text,
                 i18n.gettext(export_lang, "csv_yes") if promo.is_active else i18n.gettext(export_lang, "csv_no"),
                 promo.valid_until.strftime("%Y-%m-%d %H:%M:%S") if promo.valid_until else i18n.gettext(export_lang, "admin_promo_valid_indefinitely"),
+                _promo_registration_rule_text(promo, i18n, export_lang),
+                _promo_subscription_presence_text(promo, i18n, export_lang),
+                promo.last_activated_at.strftime("%Y-%m-%d %H:%M:%S") if getattr(promo, "last_activated_at", None) else "",
                 promo.created_at.strftime("%Y-%m-%d %H:%M:%S") if promo.created_at else "N/A",
                 promo.created_by_admin_id or "N/A"
             ]
@@ -431,11 +514,18 @@ async def promo_edit_select_handler(callback: types.CallbackQuery, i18n_data: di
     # Show appropriate edit option based on type
     if promo_type == "discount":
         builder.row(InlineKeyboardButton(text=_("admin_promo_edit_discount_percentage"), callback_data=f"promo_edit_field:discount_percentage:{promo_id}"))
+        builder.row(InlineKeyboardButton(text=_("admin_promo_edit_discount_cap"), callback_data=f"promo_edit_field:max_discount_amount:{promo_id}"))
+    elif promo_type == "traffic_gb":
+        builder.row(InlineKeyboardButton(text=_("admin_promo_edit_traffic_gb"), callback_data=f"promo_edit_field:traffic_amount_gb:{promo_id}"))
     else:
         builder.row(InlineKeyboardButton(text=_("admin_promo_edit_bonus_days"), callback_data=f"promo_edit_field:bonus_days:{promo_id}"))
 
     builder.row(InlineKeyboardButton(text=_("admin_promo_edit_max_activations"), callback_data=f"promo_edit_field:max_activations:{promo_id}"))
     builder.row(InlineKeyboardButton(text=_("admin_promo_edit_validity"), callback_data=f"promo_edit_field:valid_until:{promo_id}"))
+    builder.row(InlineKeyboardButton(text=_("admin_promo_edit_registration_rule"), callback_data=f"promo_edit_field:registration_rule:{promo_id}"))
+    builder.row(InlineKeyboardButton(text=_("admin_promo_edit_subscription_presence"), callback_data=f"promo_edit_field:subscription_presence_mode:{promo_id}"))
+    if promo_type == "discount":
+        builder.row(InlineKeyboardButton(text=_("admin_promo_edit_combined_discount_scope"), callback_data=f"promo_edit_field:combined_discount_scope:{promo_id}"))
     builder.row(InlineKeyboardButton(text=_("admin_promo_back_to_detail_button"), callback_data=f"promo_detail:{promo_id}"))
 
     await callback.message.edit_text(_("admin_promo_edit_select_field"), reply_markup=builder.as_markup())
@@ -454,9 +544,14 @@ async def promo_edit_field_handler(callback: types.CallbackQuery, state: FSMCont
 
     prompts = {
         "bonus_days": "admin_promo_prompt_bonus_days",
+        "traffic_amount_gb": "admin_promo_prompt_traffic_gb",
         "discount_percentage": "admin_promo_prompt_discount_percentage",
+        "max_discount_amount": "admin_promo_prompt_discount_cap",
         "max_activations": "admin_promo_prompt_max_activations",
-        "valid_until": "admin_promo_prompt_validity_days"
+        "valid_until": "admin_promo_prompt_validity_days",
+        "registration_rule": "admin_promo_prompt_registration_rule",
+        "subscription_presence_mode": "admin_promo_prompt_subscription_presence",
+        "combined_discount_scope": "admin_promo_prompt_combined_discount_scope",
     }
 
     prompt_key = prompts.get(field, "error_occurred_try_again")
@@ -483,12 +578,24 @@ async def process_promo_edit_details(message: types.Message, state: FSMContext, 
 
         if field == "bonus_days":
             update_data["bonus_days"] = int(value)
+        elif field == "traffic_amount_gb":
+            traffic_gb = float(value.replace(",", "."))
+            if traffic_gb <= 0:
+                await message.answer(_("admin_promo_invalid_traffic_gb"))
+                return
+            update_data["traffic_amount_gb"] = round(traffic_gb, 2)
         elif field == "discount_percentage":
             discount_pct = int(value)
             if not (1 <= discount_pct <= 100):
-                await message.answer("❌ Discount percentage must be between 1 and 100.")
+                await message.answer(_("admin_promo_invalid_discount_percentage"))
                 return
             update_data["discount_percentage"] = discount_pct
+        elif field == "max_discount_amount":
+            amount = float(value.replace(",", "."))
+            if amount < 0:
+                await message.answer(_("admin_promo_invalid_discount_cap"))
+                return
+            update_data["max_discount_amount"] = None if amount == 0 else round(amount, 2)
         elif field == "max_activations":
             update_data["max_activations"] = int(value)
         elif field == "valid_until":
@@ -497,6 +604,44 @@ async def process_promo_edit_details(message: types.Message, state: FSMContext, 
             else:
                 days = int(value)
                 update_data["valid_until"] = datetime.now(timezone.utc) + timedelta(days=days)
+        elif field == "registration_rule":
+            normalized = value.strip().lower()
+            if normalized in ["0", "-", "none", "skip", "нет", "any"]:
+                update_data["min_user_registration_date"] = None
+                update_data["registration_date_direction"] = "after"
+            else:
+                parts = value.strip().split(maxsplit=1)
+                if len(parts) != 2 or parts[0].lower() not in {"before", "after"}:
+                    await message.answer(_("admin_promo_invalid_registration_rule"))
+                    return
+                update_data["registration_date_direction"] = parts[0].lower()
+                update_data["min_user_registration_date"] = datetime.strptime(
+                    parts[1],
+                    "%Y-%m-%d",
+                ).replace(tzinfo=timezone.utc)
+        elif field == "subscription_presence_mode":
+            normalized = value.strip().lower()
+            if normalized in {"any", "all", "любой"}:
+                update_data["subscription_presence_mode"] = "any"
+                update_data["renewal_only"] = False
+            elif normalized in {"active", "active_only", "renewal", "renewal_only", "продление"}:
+                update_data["subscription_presence_mode"] = "active_only"
+                update_data["renewal_only"] = True
+            elif normalized in {"inactive", "inactive_only", "new", "new_only", "без_подписки"}:
+                update_data["subscription_presence_mode"] = "inactive_only"
+                update_data["renewal_only"] = False
+            else:
+                await message.answer(_("admin_promo_invalid_subscription_presence"))
+                return
+        elif field == "combined_discount_scope":
+            normalized = value.strip().lower()
+            if normalized in {"base", "base_only", "база"}:
+                update_data["combined_discount_scope"] = "base_only"
+            elif normalized in {"full", "all", "whole", "полностью"}:
+                update_data["combined_discount_scope"] = "full"
+            else:
+                await message.answer(_("admin_promo_invalid_combined_discount_scope"))
+                return
 
         if await promo_code_dal.update_promo_code(session, promo_id, update_data):
             await session.commit()

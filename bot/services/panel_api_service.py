@@ -614,6 +614,27 @@ class PanelApiService:
             return response_data.get("response")
         return None
 
+    async def get_user_accessible_nodes(self, user_uuid: str) -> Optional[List[Dict[str, Any]]]:
+        """Get nodes available to a specific panel user."""
+        response_data = await self._request(
+            "GET",
+            f"/users/{user_uuid}/accessible-nodes",
+            log_full_response=False,
+        )
+        if response_data and not response_data.get("error") and "response" in response_data:
+            response = response_data.get("response") or {}
+            nodes = response.get("activeNodes") or []
+            return nodes if isinstance(nodes, list) else []
+        return None
+
+    async def get_all_hosts(self) -> Optional[List[Dict[str, Any]]]:
+        """Get all panel hosts."""
+        response_data = await self._request("GET", "/hosts", log_full_response=False)
+        if response_data and not response_data.get("error") and "response" in response_data:
+            hosts = response_data.get("response") or []
+            return hosts if isinstance(hosts, list) else []
+        return None
+
     async def encrypt_happ_link(self, link_to_encrypt: str) -> Optional[str]:
         """Encrypt a subscription link using the panel's happ crypt4 API.
 

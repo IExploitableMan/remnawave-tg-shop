@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 
 from db.dal import user_dal
+from db.dal import server_report_dal
 from db.models import User
 
 from bot.keyboards.inline.user_keyboards import (
@@ -24,6 +25,7 @@ from bot.services.promo_code_service import PromoCodeService
 from config.settings import Settings
 from bot.middlewares.i18n import JsonI18n
 from bot.utils.text_sanitizer import sanitize_username, sanitize_display_name
+from bot.services.server_report_service import report_cooldown_until
 
 router = Router(name="user_start_router")
 
@@ -73,9 +75,20 @@ async def send_main_menu(target_event: Union[types.Message,
                 "Method has_had_any_subscription is missing in SubscriptionService for send_main_menu!"
             )
 
+    server_report_available = True
+    try:
+        last_server_report = await server_report_dal.get_last_report_by_user(session, user_id)
+        server_report_available = report_cooldown_until(
+            last_server_report,
+            settings.SERVER_REPORT_COOLDOWN_HOURS,
+        ) is None
+    except Exception:
+        logging.exception("Failed to resolve server report cooldown for user %s", user_id)
+
     text = _(key="main_menu_greeting", user_name=user_full_name)
     reply_markup = get_main_menu_inline_keyboard(current_lang, i18n, settings,
-                                                 show_trial_button_in_menu)
+                                                 show_trial_button_in_menu,
+                                                 server_report_available)
 
     target_message_obj: Optional[types.Message] = None
     if isinstance(target_event, types.Message):
@@ -737,6 +750,7 @@ async def main_action_callback_handler(
     from . import referral as user_referral_handlers
     from . import promo_user as user_promo_handlers
     from . import trial_handler as user_trial_handlers
+    from . import server_report as user_server_report_handlers
 
     if not callback.message:
         await callback.answer("Error: message context lost.", show_alert=True)
@@ -763,6 +777,12 @@ async def main_action_callback_handler(
     elif action == "apply_promo":
         await user_promo_handlers.prompt_promo_code_input(
             callback, state, i18n_data, settings, session)
+    elif action == "server_report":
+        await user_server_report_handlers.start_server_report_flow(
+            callback, state, i18n_data, settings, session)
+    elif action == "server_report_cooldown":
+        await user_server_report_handlers.show_cooldown_alert(
+            callback, i18n_data, settings, session)
     elif action == "request_trial":
         await user_trial_handlers.request_trial_confirmation_handler(
             callback,

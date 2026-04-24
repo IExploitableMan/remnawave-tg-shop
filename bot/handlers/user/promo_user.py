@@ -21,6 +21,7 @@ from bot.utils.product_kinds import (
     PAYMENT_KIND_ADDON_SUBSCRIPTION,
     PAYMENT_KIND_ADDON_TRAFFIC_TOPUP,
     PAYMENT_KIND_BASE_SUBSCRIPTION,
+    PAYMENT_KIND_COMBINED_SUBSCRIPTION,
 )
 
 from .start import send_main_menu
@@ -39,12 +40,16 @@ def _preferred_payment_kind_for_discount(promo_model) -> str:
     allowed = []
     if getattr(promo_model, "applies_to_base_subscription", False):
         allowed.append(PAYMENT_KIND_BASE_SUBSCRIPTION)
+    if getattr(promo_model, "applies_to_combined_subscription", False):
+        allowed.append(PAYMENT_KIND_COMBINED_SUBSCRIPTION)
     if getattr(promo_model, "applies_to_addon_subscription", False):
         allowed.append(PAYMENT_KIND_ADDON_SUBSCRIPTION)
     if getattr(promo_model, "applies_to_addon_traffic_topup", False):
         allowed.append(PAYMENT_KIND_ADDON_TRAFFIC_TOPUP)
     if PAYMENT_KIND_BASE_SUBSCRIPTION in allowed:
         return PAYMENT_KIND_BASE_SUBSCRIPTION
+    if PAYMENT_KIND_COMBINED_SUBSCRIPTION in allowed:
+        return PAYMENT_KIND_COMBINED_SUBSCRIPTION
     return allowed[0] if allowed else PAYMENT_KIND_BASE_SUBSCRIPTION
 
 
@@ -142,54 +147,22 @@ async def process_promo_code_input(message: types.Message, state: FSMContext,
                                   code=hcode(code_input.upper()))
         reply_markup = get_back_to_main_menu_markup(current_lang, i18n)
     else:
-        # Try as BONUS code first (existing behavior)
-        success, result = await promo_code_service.apply_promo_code(
-            session, user.id, code_input, current_lang)
+        promo_model = await promo_code_dal.get_promo_code_by_code(session, code_input.upper())
+        promo_type = getattr(promo_model, "promo_type", None)
 
-        if success:
-            # Bonus code success
-            await session.commit()
-            logging.info(
-                f"Bonus promo code '{code_input}' successfully applied for user {user.id}."
-            )
-
-            new_end_date = result if isinstance(result, datetime) else None
-            active = await subscription_service.get_active_subscription_details(session, user.id)
-            config_link_display = active.get("config_link") if active else None
-            connect_button_url = active.get("connect_button_url") if active else None
-            config_link_text = config_link_display or _("config_link_not_available")
-
-            response_to_user_text = _(
-                "promo_code_applied_success_full",
-                end_date=(new_end_date.strftime("%d.%m.%Y %H:%M:%S") if new_end_date else "N/A"),
-                config_link=config_link_text,
-            )
-            reply_markup = get_connect_and_main_keyboard(
-                current_lang,
-                i18n,
-                settings,
-                config_link_display,
-                connect_button_url=connect_button_url,
-            )
-        else:
-            # Bonus code failed, try as DISCOUNT code
-            promo_model = await promo_code_dal.get_promo_code_by_code(session, code_input.upper())
-            payment_kind = PAYMENT_KIND_BASE_SUBSCRIPTION
-            if promo_model and getattr(promo_model, "promo_type", None) == "discount":
-                payment_kind = _preferred_payment_kind_for_discount(promo_model)
+        if promo_type == "discount":
+            payment_kind = _preferred_payment_kind_for_discount(promo_model)
             success_discount, result_discount = await promo_code_service.apply_discount_promo_code(
                 session, user.id, code_input, current_lang, payment_kind=payment_kind
             )
 
             if success_discount:
-                # Discount code success
                 await session.commit()
                 logging.info(
                     f"Discount promo code '{code_input}' successfully applied for user {user.id}."
                 )
-                discount_pct = result_discount  # Returns percentage
+                discount_pct = result_discount
 
-                # Send notification about discount promo activation
                 if settings.LOG_PROMO_ACTIVATIONS:
                     try:
                         from bot.services.notification_service import NotificationService
@@ -210,25 +183,66 @@ async def process_promo_code_input(message: types.Message, state: FSMContext,
                 )
                 reply_markup = get_back_to_main_menu_markup(current_lang, i18n)
             else:
-                # Both failed
                 await session.rollback()
+                response_to_user_text = result_discount
+                reply_markup = get_back_to_main_menu_markup(current_lang, i18n)
+        elif promo_type == "traffic_gb":
+            success_traffic, result_traffic = await promo_code_service.apply_traffic_voucher_code(
+                session,
+                user.id,
+                code_input,
+                current_lang,
+            )
+            if success_traffic:
+                await session.commit()
                 logging.info(
-                    f"Promo code '{code_input}' application failed for user {user.id}. "
-                    f"Bonus reason: {result}. Discount reason: {result_discount}"
+                    f"Traffic voucher '{code_input}' successfully applied for user {user.id}."
                 )
-                bonus_not_found_text = _(
-                    "promo_code_not_found", code=code_input.upper()
+                overview = await subscription_service.get_subscription_overview(session, user.id)
+                addon_active = overview.get("addon") or {}
+                response_to_user_text = _(
+                    "traffic_voucher_code_applied_success",
+                    code=hcode(code_input.upper()),
+                    traffic_gb=f"{float(result_traffic.get('traffic_gb') or 0):g}",
+                    total_remaining_gb=f"{float((addon_active.get('traffic_remaining_bytes') or 0) / (1024 ** 3)):.2f}",
                 )
-                discount_not_found_text = _(
-                    "promo_code_not_found_or_not_discount", code=code_input.upper()
+                reply_markup = get_back_to_main_menu_markup(current_lang, i18n)
+            else:
+                await session.rollback()
+                response_to_user_text = result_traffic
+                reply_markup = get_back_to_main_menu_markup(current_lang, i18n)
+        else:
+            success, result = await promo_code_service.apply_promo_code(
+                session, user.id, code_input, current_lang)
+
+            if success:
+                await session.commit()
+                logging.info(
+                    f"Bonus promo code '{code_input}' successfully applied for user {user.id}."
                 )
-                if result != bonus_not_found_text and result_discount == discount_not_found_text:
-                    response_to_user_text = result
-                else:
-                    response_to_user_text = result_discount  # Prefer the discount attempt error
-                reply_markup = get_back_to_main_menu_markup(
-                    current_lang, i18n
+
+                new_end_date = result if isinstance(result, datetime) else None
+                active = await subscription_service.get_active_subscription_details(session, user.id)
+                config_link_display = active.get("config_link") if active else None
+                connect_button_url = active.get("connect_button_url") if active else None
+                config_link_text = config_link_display or _("config_link_not_available")
+
+                response_to_user_text = _(
+                    "promo_code_applied_success_full",
+                    end_date=(new_end_date.strftime("%d.%m.%Y %H:%M:%S") if new_end_date else "N/A"),
+                    config_link=config_link_text,
                 )
+                reply_markup = get_connect_and_main_keyboard(
+                    current_lang,
+                    i18n,
+                    settings,
+                    config_link_display,
+                    connect_button_url=connect_button_url,
+                )
+            else:
+                await session.rollback()
+                response_to_user_text = result
+                reply_markup = get_back_to_main_menu_markup(current_lang, i18n)
 
     await message.answer(
         response_to_user_text,

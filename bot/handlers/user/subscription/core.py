@@ -35,6 +35,26 @@ from bot.utils.product_kinds import (
 router = Router(name="user_subscription_core_router")
 
 
+def _build_discount_offer_hint(
+    get_text,
+    *,
+    payment_kind: str,
+    promo_code: str,
+    discount_pct: int,
+    combined_discount_scope: str,
+) -> str:
+    detail_lines = []
+    if payment_kind == PAYMENT_KIND_COMBINED_SUBSCRIPTION and combined_discount_scope == "base_only":
+        detail_lines.append(get_text("active_discount_detail_combined_base_only"))
+    details_suffix = f"\n{chr(10).join(detail_lines)}" if detail_lines else ""
+    return get_text(
+        "active_discount_offer_notice",
+        code=promo_code,
+        discount_pct=discount_pct,
+        details=details_suffix,
+    )
+
+
 def _shorten_hwid_for_display(hwid: Optional[str], max_length: int = 24) -> str:
     """Trim HWID for button text to keep within Telegram limits."""
     if not hwid:
@@ -114,12 +134,28 @@ async def display_subscription_options(
             rub_price = resolve_base_price(settings, effective_value, payment_kind, stars=False)
             stars_price = resolve_base_price(settings, effective_value, payment_kind, stars=True)
             if active_discount_info:
-                discount_pct, _promo_code = active_discount_info
+                discount_pct, _promo_code, max_discount_amount, combined_discount_scope = active_discount_info
                 if rub_price is not None:
-                    rub_price, _ = promo_code_service.calculate_discounted_price(rub_price, discount_pct)
+                    price_details = promo_code_service.calculate_discounted_offer_details(
+                        value=effective_value,
+                        payment_kind=payment_kind,
+                        discount_percentage=discount_pct,
+                        max_discount_amount=max_discount_amount,
+                        combined_discount_scope=combined_discount_scope,
+                    )
+                    if price_details:
+                        rub_price = float(price_details["final_price"])
                 if stars_price is not None:
-                    discounted_stars_price, _ = promo_code_service.calculate_discounted_price(float(stars_price), discount_pct)
-                    stars_price = math.ceil(discounted_stars_price)
+                    price_details = promo_code_service.calculate_discounted_offer_details(
+                        value=effective_value,
+                        payment_kind=payment_kind,
+                        discount_percentage=discount_pct,
+                        max_discount_amount=max_discount_amount,
+                        combined_discount_scope=combined_discount_scope,
+                        stars=True,
+                    )
+                    if price_details:
+                        stars_price = math.ceil(float(price_details["final_price"]))
             if rub_price is not None:
                 display[effective_value] = (rub_price, "RUB")
             elif stars_price is not None:
@@ -241,12 +277,28 @@ async def show_tariff_offer_options_callback(
             rub_price = resolve_base_price(settings, effective_value, payment_kind, stars=False)
             stars_price = resolve_base_price(settings, effective_value, payment_kind, stars=True)
             if active_discount_info:
-                discount_pct, _promo_code = active_discount_info
+                discount_pct, _promo_code, max_discount_amount, combined_discount_scope = active_discount_info
                 if rub_price is not None:
-                    rub_price, _ = promo_code_service.calculate_discounted_price(rub_price, discount_pct)
+                    price_details = promo_code_service.calculate_discounted_offer_details(
+                        value=effective_value,
+                        payment_kind=payment_kind,
+                        discount_percentage=discount_pct,
+                        max_discount_amount=max_discount_amount,
+                        combined_discount_scope=combined_discount_scope,
+                    )
+                    if price_details:
+                        rub_price = float(price_details["final_price"])
                 if stars_price is not None:
-                    discounted_stars_price, _ = promo_code_service.calculate_discounted_price(float(stars_price), discount_pct)
-                    stars_price = math.ceil(discounted_stars_price)
+                    price_details = promo_code_service.calculate_discounted_offer_details(
+                        value=effective_value,
+                        payment_kind=payment_kind,
+                        discount_percentage=discount_pct,
+                        max_discount_amount=max_discount_amount,
+                        combined_discount_scope=combined_discount_scope,
+                        stars=True,
+                    )
+                    if price_details:
+                        stars_price = math.ceil(float(price_details["final_price"]))
             if rub_price is not None:
                 display[effective_value] = (rub_price, "RUB")
             elif stars_price is not None:
@@ -300,6 +352,32 @@ async def show_tariff_offer_options_callback(
     else:
         await callback.answer(get_text("error_try_again"), show_alert=True)
         return
+
+    if promo_code_service and product_code in {"base", "combined", "addon_upgrade", "addon_topup"}:
+        payment_kind_map = {
+            "base": PAYMENT_KIND_BASE_SUBSCRIPTION,
+            "combined": PAYMENT_KIND_COMBINED_SUBSCRIPTION,
+            "addon_upgrade": "addon_subscription",
+            "addon_topup": PAYMENT_KIND_ADDON_TRAFFIC_TOPUP,
+        }
+        active_discount_info = await promo_code_service.get_user_active_discount(
+            session,
+            callback.from_user.id,
+            payment_kind=payment_kind_map[product_code],
+        )
+        if active_discount_info:
+            discount_pct, promo_code, max_discount_amount, combined_discount_scope = active_discount_info
+            text_content = (
+                _build_discount_offer_hint(
+                    get_text,
+                    payment_kind=payment_kind_map[product_code],
+                    promo_code=promo_code,
+                    discount_pct=discount_pct,
+                    combined_discount_scope=combined_discount_scope,
+                )
+                + "\n\n"
+                + text_content
+            )
 
     try:
         await callback.message.edit_text(text_content, reply_markup=reply_markup)

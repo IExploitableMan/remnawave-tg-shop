@@ -26,11 +26,19 @@ async def resolve_fiat_offer_price_for_user(
     session: AsyncSession,
     settings: Settings,
     user_id: int,
-    value: float,
-    payment_kind: str,
+    value: Optional[float] = None,
+    payment_kind: Optional[str] = None,
     promo_code_service=None,
+    months: Optional[float] = None,
+    sale_mode: Optional[str] = None,
 ) -> Optional[float]:
     """Resolve offer price server-side to prevent callback payload tampering."""
+    if value is None:
+        value = months
+    if payment_kind is None:
+        payment_kind = sale_mode
+    if value is None or payment_kind is None:
+        return None
     payment_kind = normalize_payment_kind(payment_kind)
     base_price = resolve_base_price(settings, value, payment_kind, stars=False)
     if base_price is None:
@@ -44,12 +52,43 @@ async def resolve_fiat_offer_price_for_user(
             payment_kind=payment_kind,
         )
         if active_discount_info:
-            discount_pct, _ = active_discount_info
-            resolved_price, _ = promo_code_service.calculate_discounted_price(
-                resolved_price,
-                discount_pct,
+            discount_pct, _, max_discount_amount, combined_discount_scope = active_discount_info
+            offer_details = promo_code_service.calculate_discounted_offer_details(
+                value=value,
+                payment_kind=payment_kind,
+                discount_percentage=discount_pct,
+                max_discount_amount=max_discount_amount,
+                combined_discount_scope=combined_discount_scope,
             )
+            if offer_details:
+                resolved_price = float(offer_details["final_price"])
     return resolved_price
+
+
+def _build_discount_details_text(
+    get_text,
+    *,
+    payment_kind: str,
+    combined_discount_scope: str,
+    cap_applied: bool,
+    max_discount_amount: Optional[float],
+    currency_symbol: str,
+) -> str:
+    details: list[str] = []
+    if (
+        payment_kind == PAYMENT_KIND_COMBINED_SUBSCRIPTION
+        and combined_discount_scope == "base_only"
+    ):
+        details.append(get_text("active_discount_detail_combined_base_only"))
+    if cap_applied and max_discount_amount is not None:
+        details.append(
+            get_text(
+                "active_discount_detail_max_discount",
+                amount=f"{float(max_discount_amount):g}",
+                currency_symbol=currency_symbol,
+            )
+        )
+    return "\n".join(details)
 
 
 async def _render_payment_method_selection(
@@ -111,11 +150,25 @@ async def _render_payment_method_selection(
         )
 
         if active_discount_info:
-            discount_pct, promo_code = active_discount_info
+            discount_pct, promo_code, max_discount_amount, combined_discount_scope = active_discount_info
             if price_rub is not None:
-                original_price_rub = price_rub
-                price_rub, discount_amt = promo_code_service.calculate_discounted_price(
-                    price_rub, discount_pct
+                price_details_rub = promo_code_service.calculate_discounted_offer_details(
+                    value=display_value,
+                    payment_kind=payment_kind,
+                    discount_percentage=discount_pct,
+                    max_discount_amount=max_discount_amount,
+                    combined_discount_scope=combined_discount_scope,
+                )
+                original_price_rub = float(price_details_rub["original_price"]) if price_details_rub else float(price_rub)
+                price_rub = float(price_details_rub["final_price"]) if price_details_rub else float(price_rub)
+                discount_amt = float(price_details_rub["discount_amount"]) if price_details_rub else 0.0
+                details_text = _build_discount_details_text(
+                    get_text,
+                    payment_kind=payment_kind,
+                    combined_discount_scope=combined_discount_scope,
+                    cap_applied=bool(price_details_rub["cap_applied"]) if price_details_rub else False,
+                    max_discount_amount=max_discount_amount,
+                    currency_symbol=currency_symbol_val,
                 )
                 discount_text = get_text(
                     "active_discount_notice",
@@ -125,16 +178,31 @@ async def _render_payment_method_selection(
                     discounted_price=price_rub,
                     discount_amount=discount_amt,
                     currency_symbol=currency_symbol_val,
+                    details=(f"\n{details_text}" if details_text else ""),
                 )
             if stars_price is not None:
-                original_stars_price = stars_price
-                discounted_stars_price, _ = promo_code_service.calculate_discounted_price(
-                    float(stars_price), discount_pct
+                price_details_stars = promo_code_service.calculate_discounted_offer_details(
+                    value=display_value,
+                    payment_kind=payment_kind,
+                    discount_percentage=discount_pct,
+                    max_discount_amount=max_discount_amount,
+                    combined_discount_scope=combined_discount_scope,
+                    stars=True,
                 )
+                original_stars_price = float(price_details_stars["original_price"]) if price_details_stars else float(stars_price)
+                discounted_stars_price = float(price_details_stars["final_price"]) if price_details_stars else float(stars_price)
                 discounted_stars_price = math.ceil(discounted_stars_price)
                 stars_price = discounted_stars_price
                 if not discount_text:
                     discount_amt = original_stars_price - discounted_stars_price
+                    details_text = _build_discount_details_text(
+                        get_text,
+                        payment_kind=payment_kind,
+                        combined_discount_scope=combined_discount_scope,
+                        cap_applied=bool(price_details_stars["cap_applied"]) if price_details_stars else False,
+                        max_discount_amount=max_discount_amount,
+                        currency_symbol="⭐",
+                    )
                     discount_text = get_text(
                         "active_discount_notice",
                         code=promo_code,
@@ -143,6 +211,7 @@ async def _render_payment_method_selection(
                         discounted_price=discounted_stars_price,
                         discount_amount=discount_amt,
                         currency_symbol="⭐",
+                        details=(f"\n{details_text}" if details_text else ""),
                     )
 
     if price_rub is None:

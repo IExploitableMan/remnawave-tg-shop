@@ -9,7 +9,8 @@ def get_main_menu_inline_keyboard(
         lang: str,
         i18n_instance,
         settings: Settings,
-        show_trial_button: bool = False) -> InlineKeyboardMarkup:
+        show_trial_button: bool = False,
+        server_report_available: bool = True) -> InlineKeyboardMarkup:
     _ = lambda key, **kwargs: i18n_instance.gettext(lang, key, **kwargs)
     builder = InlineKeyboardBuilder()
 
@@ -25,6 +26,12 @@ def get_main_menu_inline_keyboard(
         InlineKeyboardButton(
             text=_(key="menu_my_subscription_inline"),
             callback_data="main_action:my_subscription",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=_(key="menu_server_report_button" if server_report_available else "menu_server_report_unavailable_button"),
+            callback_data="main_action:server_report" if server_report_available else "main_action:server_report_cooldown",
         )
     )
 

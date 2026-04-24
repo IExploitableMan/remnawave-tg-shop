@@ -3,7 +3,9 @@ import math
 import re
 import csv
 import io
+import json
 from datetime import datetime
+from html import escape
 from aiogram import Router, F, types, Bot
 from aiogram.fsm.context import FSMContext
 from typing import Optional, List, Dict, Any
@@ -23,6 +25,134 @@ from bot.middlewares.i18n import JsonI18n
 
 router = Router(name="admin_logs_router")
 USERNAME_REGEX = re.compile(r"^[a-zA-Z0-9_]{5,32}$")
+
+
+def _humanize_log_token(token: Optional[str]) -> str:
+    value = (token or "").strip()
+    if not value:
+        return "Unknown"
+    if value.startswith("/"):
+        return value
+    if value.isdigit():
+        return f"ID {value}"
+    parts = [part for part in value.replace("-", "_").split("_") if part]
+    if not parts:
+        return value
+    return " ".join(part.capitalize() for part in parts)
+
+
+def _extract_update_details(log_entry_model: MessageLog) -> dict[str, Any]:
+    details: dict[str, Any] = {}
+    raw_payload = log_entry_model.raw_update_preview
+    if not raw_payload:
+        return details
+
+    try:
+        payload = json.loads(raw_payload)
+    except Exception:
+        return details
+
+    callback = payload.get("callback_query") or {}
+    message = payload.get("message") or {}
+    effective_message = callback.get("message") or message or {}
+    callback_data = callback.get("data")
+    if callback_data:
+        details["callback_data"] = str(callback_data)
+
+    text_value = effective_message.get("text") or effective_message.get("caption")
+    if text_value:
+        details["message_text"] = str(text_value)
+
+    content_type = effective_message.get("content_type")
+    if content_type:
+        details["content_type"] = str(content_type)
+
+    return details
+
+
+def _get_effective_log_payload(log_entry_model: MessageLog) -> Optional[str]:
+    if log_entry_model.content and log_entry_model.content != "N/A":
+        return log_entry_model.content
+
+    details = _extract_update_details(log_entry_model)
+    return details.get("callback_data") or details.get("message_text") or details.get("content_type")
+
+
+def _format_log_action(log_entry_model: MessageLog) -> tuple[str, Optional[str], Optional[str]]:
+    event_type = log_entry_model.event_type or ""
+    effective_payload = _get_effective_log_payload(log_entry_model)
+
+    if event_type.startswith("callback:"):
+        callback_data = effective_payload or event_type.split(":", 1)[1]
+        callback_parts = [part for part in callback_data.split(":") if part]
+        if callback_parts:
+            title = " -> ".join(_humanize_log_token(part) for part in callback_parts[:3])
+            raw_tail = ":".join(callback_parts[3:]) if len(callback_parts) > 3 else None
+            return f"Callback: {title}", callback_data, raw_tail
+        return "Callback", callback_data or None, None
+
+    if event_type.startswith("command:"):
+        command_value = effective_payload or event_type.split(":", 1)[1]
+        return f"Command: {command_value}", command_value, None
+
+    if event_type.startswith("message:"):
+        message_kind = event_type.split(":", 1)[1] if ":" in event_type else "message"
+        text_value = effective_payload or None
+        return f"Message: {_humanize_log_token(message_kind)}", text_value, None
+
+    return _humanize_log_token(event_type), effective_payload, None
+
+
+def _format_log_entry_text(log_entry_model: MessageLog, i18n: JsonI18n, current_lang: str) -> str:
+    _ = lambda key, **kwargs: i18n.gettext(current_lang, key, **kwargs)
+
+    user_display_parts = []
+    if log_entry_model.telegram_first_name:
+        user_display_parts.append(log_entry_model.telegram_first_name)
+    if log_entry_model.telegram_username:
+        user_display_parts.append(f"(@{log_entry_model.telegram_username})")
+
+    user_display = " ".join(user_display_parts).strip()
+    if not user_display:
+        user_display = _(
+            "system_or_unknown_user"
+        ) if not log_entry_model.user_id else f"ID: {log_entry_model.user_id}"
+
+    user_id_display = str(log_entry_model.user_id) if log_entry_model.user_id is not None else "N/A"
+    timestamp_str_display = log_entry_model.timestamp.strftime(
+        "%Y-%m-%d %H:%M:%S"
+    ) if log_entry_model.timestamp else "N/A"
+
+    action_label, payload_value, raw_tail = _format_log_action(log_entry_model)
+    lines = [
+        f"<code>{escape(timestamp_str_display)}</code> - <b>{escape(user_display)}</b> (ID: {escape(user_id_display)})",
+        f"  <b>{escape(_('admin_log_action_label'))}</b> {escape(action_label)}",
+    ]
+
+    if payload_value:
+        payload_preview = payload_value[:200]
+        if len(payload_value) > 200:
+            payload_preview += "..."
+        lines.append(
+            f"  <b>{escape(_('admin_log_payload_label'))}</b> <code>{escape(payload_preview)}</code>"
+        )
+
+    if raw_tail:
+        lines.append(
+            f"  <b>{escape(_('admin_log_details_label'))}</b> <code>{escape(raw_tail[:120])}</code>"
+        )
+
+    if not payload_value and log_entry_model.raw_update_preview:
+        lines.append(
+            f"  <b>{escape(_('admin_log_details_label'))}</b> {escape(_('admin_log_details_from_raw'))}"
+        )
+
+    if not payload_value and not log_entry_model.raw_update_preview:
+        lines.append(
+            f"  <b>{escape(_('admin_log_details_label'))}</b> {escape(_('admin_log_details_unavailable'))}"
+        )
+
+    return "\n".join(lines)
 
 
 async def display_logs_menu(callback: types.CallbackQuery, i18n_data: dict,
@@ -83,37 +213,9 @@ async def _display_formatted_logs(target_message: types.Message,
 
         log_entries_text = []
         for log_entry_model in logs:
-            user_display_parts = []
-            if log_entry_model.telegram_first_name:
-                user_display_parts.append(log_entry_model.telegram_first_name)
-            if log_entry_model.telegram_username:
-                user_display_parts.append(
-                    f"(@{log_entry_model.telegram_username})")
-
-            user_display = " ".join(user_display_parts).strip()
-            if not user_display:
-                user_display = _(
-                    "system_or_unknown_user"
-                ) if not log_entry_model.user_id else f"ID: {log_entry_model.user_id}"
-
-            user_id_display = str(
-                log_entry_model.user_id
-            ) if log_entry_model.user_id is not None else "N/A"
-            content_raw = log_entry_model.content or ""
-            content_preview = (content_raw[:100] +
-                               "...") if len(content_raw) > 100 else (
-                                   content_raw or "N/A")
-
-            timestamp_str_display = log_entry_model.timestamp.strftime(
-                '%Y-%m-%d %H:%M:%S') if log_entry_model.timestamp else 'N/A'
-
             log_entries_text.append(
-                _("admin_log_entry_format",
-                  timestamp_str=timestamp_str_display,
-                  user_display=user_display,
-                  user_id=user_id_display,
-                  event_type=log_entry_model.event_type or 'N/A',
-                  content_preview=content_preview).replace("\n", "\n  "))
+                _format_log_entry_text(log_entry_model, i18n, current_lang)
+            )
         text += "\n\n".join(log_entries_text)
         reply_markup = get_logs_pagination_keyboard(
             current_page_idx,
@@ -389,12 +491,15 @@ async def export_logs_csv_handler(callback: types.CallbackQuery,
 
         # Write data rows
         for log in logs_models:
+            action_label, payload_value, raw_tail = _format_log_action(log)
             # Format timestamp
             timestamp_str = log.timestamp.strftime('%Y-%m-%d %H:%M:%S UTC') if log.timestamp else ''
 
             # Clean content and raw_update_preview (remove newlines and quotes for CSV)
             content_clean = (log.content or '').replace('\n', ' ').replace('\r', ' ').strip()
             raw_update_clean = (log.raw_update_preview or '').replace('\n', ' ').replace('\r', ' ').strip()
+            payload_clean = (payload_value or '').replace('\n', ' ').replace('\r', ' ').strip()
+            details_clean = (raw_tail or '').replace('\n', ' ').replace('\r', ' ').strip()
 
             row = [
                 log.log_id or '',
@@ -402,14 +507,14 @@ async def export_logs_csv_handler(callback: types.CallbackQuery,
                 log.user_id or '',
                 log.telegram_username or '',
                 log.telegram_first_name or '',
-                log.event_type or '',
+                action_label,
                 'Yes' if log.is_admin_event else 'No',
                 log.target_user_id or '',
             ]
             if include_sensitive_fields:
                 row.extend([
-                    content_clean,
-                    raw_update_clean,
+                    payload_clean or content_clean,
+                    details_clean or raw_update_clean,
                 ])
             csv_writer.writerow(row)
 

@@ -17,6 +17,7 @@ from bot.services.subscription_service import SubscriptionService
 from bot.services.panel_api_service import PanelApiService
 from bot.services.referral_service import ReferralService
 from bot.middlewares.i18n import JsonI18n
+from bot.handlers.admin.logs_admin import _format_log_action
 from bot.utils import get_message_content, send_direct_message
 from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardButton
 from bot.utils.text_sanitizer import (
@@ -649,12 +650,14 @@ async def handle_view_user_logs(callback: types.CallbackQuery, user: User,
         
         for log in logs:
             timestamp = log.timestamp.strftime('%Y-%m-%d %H:%M') if log.timestamp else 'N/A'
-            event_type = log.event_type or 'N/A'
-            content_preview = (log.content or '')[:50] + ('...' if len(log.content or '') > 50 else '')
+            action_label, payload_value, _ = _format_log_action(log)
+            content_preview = payload_value or ""
+            if len(content_preview) > 80:
+                content_preview = content_preview[:80] + "..."
             
             logs_text_parts.append(
-                f"🕐 {hcode(timestamp)} - {hcode(event_type)}\n"
-                f"   {content_preview}"
+                f"🕐 {hcode(timestamp)} - {hcode(action_label)}\n"
+                f"   {hcode(content_preview or _('admin_log_details_unavailable'))}"
             )
         
         logs_text = "\n\n".join(logs_text_parts)

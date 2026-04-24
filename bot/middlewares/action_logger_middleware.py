@@ -64,9 +64,7 @@ class ActionLoggerMiddleware(BaseMiddleware):
         elif event.callback_query:
             cb: CallbackQuery = event.callback_query
             content = cb.data
-            action_part = cb.data.split(
-                ":")[0] if cb.data and ":" in cb.data else cb.data
-            current_event_type = f"callback:{action_part}"
+            current_event_type = f"callback:{cb.data}" if cb.data else "callback"
 
         if user_id or current_event_type not in ["update"]:
 

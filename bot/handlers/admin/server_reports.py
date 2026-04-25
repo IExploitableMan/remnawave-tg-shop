@@ -1,5 +1,6 @@
 import math
 from datetime import datetime
+from html import escape
 from typing import Optional
 
 from aiogram import F, Router, types
@@ -153,7 +154,7 @@ async def report_detail_callback(callback: types.CallbackQuery, i18n_data: dict,
         return
     _ = lambda key, **kwargs: i18n.gettext(current_lang, key, **kwargs)
     try:
-        _, _, report_id_raw, page_raw = callback.data.split(":")
+        _prefix, _action, report_id_raw, page_raw = callback.data.split(":")
         report_id = int(report_id_raw)
         page = int(page_raw)
     except (ValueError, IndexError):
@@ -184,6 +185,7 @@ async def report_detail_callback(callback: types.CallbackQuery, i18n_data: dict,
         user=_user_label(report.user, report.user_id),
         user_id=report.user_id,
         issue=get_issue_text(i18n, current_lang, report.issue_type),
+        details=escape(report.details or "-"),
         hosts=hosts_text,
     )
 
@@ -211,7 +213,7 @@ async def report_user_card_callback(
         return
     _ = lambda key, **kwargs: i18n.gettext(current_lang, key, **kwargs)
     try:
-        _, user_id_raw, page_raw = callback.data.split(":")
+        _prefix, user_id_raw, page_raw = callback.data.split(":")
         user_id = int(user_id_raw)
         page = int(page_raw)
     except (ValueError, IndexError):
@@ -237,4 +239,3 @@ async def report_user_card_callback(
         parse_mode="HTML",
     )
     await callback.answer()
-

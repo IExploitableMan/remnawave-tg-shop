@@ -22,6 +22,7 @@ class PanelApiService:
         self.api_key = settings.PANEL_API_KEY
         self._session: Optional[aiohttp.ClientSession] = None
         self.default_client_ip = "127.0.0.1"
+        self._profile_inbounds_cache: Dict[str, List[Dict[str, Any]]] = {}
 
     async def __aenter__(self):
         """Context manager entry"""
@@ -627,12 +628,46 @@ class PanelApiService:
             return nodes if isinstance(nodes, list) else []
         return None
 
+    async def get_internal_squad_accessible_nodes(self, squad_uuid: str) -> Optional[List[Dict[str, Any]]]:
+        """Get nodes available to a specific internal squad."""
+        response_data = await self._request(
+            "GET",
+            f"/internal-squads/{squad_uuid}/accessible-nodes",
+            log_full_response=False,
+        )
+        if response_data and not response_data.get("error") and "response" in response_data:
+            response = response_data.get("response") or {}
+            nodes = response.get("accessibleNodes") or []
+            return nodes if isinstance(nodes, list) else []
+        return None
+
     async def get_all_hosts(self) -> Optional[List[Dict[str, Any]]]:
         """Get all panel hosts."""
         response_data = await self._request("GET", "/hosts", log_full_response=False)
         if response_data and not response_data.get("error") and "response" in response_data:
             hosts = response_data.get("response") or []
             return hosts if isinstance(hosts, list) else []
+        return None
+
+    async def get_inbounds_by_profile_uuid(self, profile_uuid: str) -> Optional[List[Dict[str, Any]]]:
+        """Get inbounds for config profile and cache result for current service lifetime."""
+        profile_uuid = str(profile_uuid or "").strip()
+        if not profile_uuid:
+            return []
+        if profile_uuid in self._profile_inbounds_cache:
+            return self._profile_inbounds_cache[profile_uuid]
+
+        response_data = await self._request(
+            "GET",
+            f"/config-profiles/{profile_uuid}/inbounds",
+            log_full_response=False,
+        )
+        if response_data and not response_data.get("error") and "response" in response_data:
+            response = response_data.get("response") or {}
+            inbounds = response.get("inbounds") if isinstance(response, dict) else response
+            if isinstance(inbounds, list):
+                self._profile_inbounds_cache[profile_uuid] = inbounds
+                return inbounds
         return None
 
     async def encrypt_happ_link(self, link_to_encrypt: str) -> Optional[str]:

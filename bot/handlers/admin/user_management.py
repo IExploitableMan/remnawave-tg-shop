@@ -650,14 +650,14 @@ async def handle_view_user_logs(callback: types.CallbackQuery, user: User,
         
         for log in logs:
             timestamp = log.timestamp.strftime('%Y-%m-%d %H:%M') if log.timestamp else 'N/A'
-            action_label, payload_value, _ = _format_log_action(log)
+            action_label, payload_value, raw_details = _format_log_action(log)
             content_preview = payload_value or ""
             if len(content_preview) > 80:
                 content_preview = content_preview[:80] + "..."
             
             logs_text_parts.append(
                 f"🕐 {hcode(timestamp)} - {hcode(action_label)}\n"
-                f"   {hcode(content_preview or _('admin_log_details_unavailable'))}"
+                f"   {hcode(content_preview or raw_details or _('admin_log_details_unavailable'))}"
             )
         
         logs_text = "\n\n".join(logs_text_parts)

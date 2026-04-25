@@ -18,8 +18,14 @@ async def create_server_report(
     user_id: int,
     issue_type: str,
     hosts: Iterable[dict[str, Any]],
+    details: Optional[str] = None,
 ) -> ServerReport:
-    report = ServerReport(user_id=user_id, issue_type=issue_type, status="new")
+    report = ServerReport(
+        user_id=user_id,
+        issue_type=issue_type,
+        details=details,
+        status="new",
+    )
     session.add(report)
     await session.flush()
 
@@ -181,4 +187,3 @@ async def mark_report_seen(
         .where(ServerReport.report_id == report_id)
         .values(status="seen")
     )
-

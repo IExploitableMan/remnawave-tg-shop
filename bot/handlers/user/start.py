@@ -483,10 +483,6 @@ async def start_command_handler(message: types.Message,
                                                       db_user):
         return
 
-    # Send welcome message if not disabled
-    if not settings.DISABLE_WELCOME_MESSAGE:
-        await message.answer(_(key="welcome", user_name=hd.quote(user.full_name)))
-
     # Auto-apply promo code if provided via start parameter
     if promo_code_to_apply:
         try:
@@ -611,44 +607,18 @@ async def verify_channel_subscription_callback(
     else:
         _ = lambda key, **kwargs: key
 
-    if not settings.DISABLE_WELCOME_MESSAGE:
-        welcome_text = _(key="welcome",
-                         user_name=hd.quote(callback.from_user.full_name))
-        if callback.message:
-            try:
-                await callback.message.edit_text(welcome_text)
-            except Exception as welcome_edit_error:
-                logging.debug(
-                    "Failed to edit subscription prompt to welcome for user %s: %s",
-                    callback.from_user.id,
-                    welcome_edit_error,
-                )
-                await callback.message.answer(welcome_text)
-        else:
-            fallback_bot: Optional[Bot] = getattr(callback, "bot", None)
-            if fallback_bot:
-                await fallback_bot.send_message(callback.from_user.id,
-                                                welcome_text)
-
     try:
         await callback.answer(_(key="channel_subscription_verified_success"),
                               show_alert=True)
     except Exception as exc:
         logging.debug("Suppressed exception in bot/handlers/user/start.py: %s", exc)
 
-    menu_target_event: Union[types.Message, types.CallbackQuery] = callback
-    should_edit_menu_message = bool(callback.message)
-
-    if not settings.DISABLE_WELCOME_MESSAGE and callback.message:
-        menu_target_event = callback.message
-        should_edit_menu_message = False
-
-    await send_main_menu(menu_target_event,
+    await send_main_menu(callback,
                          settings,
                          i18n_data,
                          subscription_service,
                          session,
-                         is_edit=should_edit_menu_message)
+                         is_edit=bool(callback.message))
 
 
 @router.message(Command("language"))

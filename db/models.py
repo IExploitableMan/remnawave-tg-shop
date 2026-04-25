@@ -296,6 +296,7 @@ class ServerReport(Base):
     report_id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(BigInteger, ForeignKey("users.user_id"), nullable=False, index=True)
     issue_type = Column(String, nullable=False, index=True)
+    details = Column(Text, nullable=True)
     status = Column(String, nullable=False, default="new", index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 

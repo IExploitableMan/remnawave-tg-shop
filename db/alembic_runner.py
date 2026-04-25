@@ -280,6 +280,7 @@ def _run_legacy_migrator_compatibility(connection: Connection) -> None:
                     report_id SERIAL PRIMARY KEY,
                     user_id BIGINT NOT NULL REFERENCES users(user_id),
                     issue_type VARCHAR NOT NULL,
+                    details TEXT,
                     status VARCHAR NOT NULL DEFAULT 'new',
                     created_at TIMESTAMPTZ DEFAULT now()
                 )
@@ -290,6 +291,12 @@ def _run_legacy_migrator_compatibility(connection: Connection) -> None:
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_server_reports_issue_type ON server_reports (issue_type)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_server_reports_status ON server_reports (status)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_server_reports_created_at ON server_reports (created_at)"))
+
+    db_inspector = inspect(connection)
+    if db_inspector.has_table("server_reports"):
+        columns = {column["name"] for column in db_inspector.get_columns("server_reports")}
+        if "details" not in columns:
+            connection.execute(text("ALTER TABLE server_reports ADD COLUMN details TEXT"))
 
     db_inspector = inspect(connection)
     if db_inspector.has_table("server_reports") and not db_inspector.has_table("server_report_hosts"):

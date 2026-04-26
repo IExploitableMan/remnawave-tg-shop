@@ -341,6 +341,21 @@ def _run_legacy_migrator_compatibility(connection: Connection) -> None:
         )
         has_active_discounts = True
 
+    db_inspector = inspect(connection)
+    if not db_inspector.has_table("app_settings"):
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key VARCHAR PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TIMESTAMPTZ DEFAULT now(),
+                    updated_by BIGINT
+                )
+                """
+            )
+        )
+
     if has_active_discounts and has_promo_codes:
         connection.execute(
             text(

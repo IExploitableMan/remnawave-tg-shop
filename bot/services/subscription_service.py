@@ -20,6 +20,7 @@ from bot.utils.product_kinds import (
     normalize_payment_kind,
 )
 from config.settings import Settings
+from bot.services.runtime_settings_service import RuntimeSettingsService
 from db.dal import (
     addon_traffic_dal,
     payment_dal,
@@ -31,6 +32,7 @@ from db.dal import (
 from db.models import Subscription, User
 
 from .panel_api_service import PanelApiService
+from bot.keyboards.inline.user_keyboards import get_subscribe_only_markup
 
 
 class SubscriptionService:
@@ -46,19 +48,22 @@ class SubscriptionService:
         self.bot = bot
         self.i18n = i18n
         self._addon_worker_task: Optional[asyncio.Task] = None
+        self._expiry_warning_worker_task: Optional[asyncio.Task] = None
         self._async_session_factory: Optional[sessionmaker] = None
 
     async def close(self) -> None:
-        if self._addon_worker_task:
-            self._addon_worker_task.cancel()
+        for task in (self._addon_worker_task, self._expiry_warning_worker_task):
+            if not task:
+                continue
+            task.cancel()
             try:
-                await self._addon_worker_task
+                await task
             except asyncio.CancelledError:
                 pass
             except Exception:
-                logging.exception("Failed to stop add-on traffic worker")
-            finally:
-                self._addon_worker_task = None
+                logging.exception("Failed to stop subscription worker")
+        self._addon_worker_task = None
+        self._expiry_warning_worker_task = None
 
     async def setup_addon_traffic_worker(self, async_session_factory: sessionmaker) -> None:
         self._async_session_factory = async_session_factory
@@ -69,6 +74,16 @@ class SubscriptionService:
             name="AddonTrafficWorker",
         )
         logging.info("SubscriptionService: add-on traffic worker started.")
+
+    async def setup_expiry_warning_worker(self, async_session_factory: sessionmaker) -> None:
+        self._async_session_factory = async_session_factory
+        if self._expiry_warning_worker_task and not self._expiry_warning_worker_task.done():
+            return
+        self._expiry_warning_worker_task = asyncio.create_task(
+            self._expiry_warning_worker_loop(),
+            name="SubscriptionExpiryWarningWorker",
+        )
+        logging.info("SubscriptionService: expiry warning worker started.")
 
     async def _addon_traffic_worker_loop(self) -> None:
         interval = max(30, int(self.settings.ADDON_TRAFFIC_WORKER_INTERVAL_SECONDS or 300))
@@ -81,6 +96,98 @@ class SubscriptionService:
             except Exception:
                 logging.exception("SubscriptionService: unhandled add-on worker error")
             await asyncio.sleep(interval)
+
+    async def _expiry_warning_worker_loop(self) -> None:
+        interval = max(60, int(self.settings.EXPIRY_WARNING_WORKER_INTERVAL_SECONDS or 900))
+        while True:
+            try:
+                if self._async_session_factory:
+                    await self._process_expiry_warnings_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.exception("SubscriptionService: unhandled expiry warning worker error")
+            await asyncio.sleep(interval)
+
+    async def _process_expiry_warnings_once(self) -> None:
+        if not self._async_session_factory or not self.bot or not self.i18n:
+            return
+        runtime = RuntimeSettingsService(self.settings)
+        async with self._async_session_factory() as session:
+            targets = (
+                (
+                    "base",
+                    SUBSCRIPTION_KIND_BASE,
+                    False,
+                    False,
+                    "base_expiry_warning_enabled",
+                    "base_expiry_warning_hours_before",
+                    "subscription_expiry_warning_base",
+                ),
+                (
+                    "trial",
+                    SUBSCRIPTION_KIND_BASE,
+                    True,
+                    False,
+                    "trial_expiry_warning_enabled",
+                    "trial_expiry_warning_hours_before",
+                    "subscription_expiry_warning_trial",
+                ),
+                (
+                    "addon",
+                    SUBSCRIPTION_KIND_ADDON,
+                    False,
+                    True,
+                    "addon_expiry_warning_enabled",
+                    "addon_expiry_warning_hours_before",
+                    "subscription_expiry_warning_addon",
+                ),
+            )
+            for _, kind, is_trial, include_skipped, enabled_key, hours_key, message_key in targets:
+                if not await runtime.get_bool(session, enabled_key):
+                    continue
+                hours_before = await runtime.get_int(session, hours_key)
+                if hours_before <= 0:
+                    continue
+                due_subs = await subscription_dal.get_subscriptions_due_for_expiry_warning(
+                    session,
+                    hours_before,
+                    kind=kind,
+                    trial=is_trial,
+                    include_skipped=include_skipped,
+                )
+                for sub in due_subs:
+                    await self._send_expiry_warning(session, sub, message_key)
+            await session.commit()
+
+    async def _send_expiry_warning(self, session: AsyncSession, sub: Subscription, message_key: str) -> None:
+        if not self.bot or not self.i18n or not sub.user:
+            return
+        lang = sub.user.language_code or self.settings.DEFAULT_LANGUAGE
+        _ = lambda k, **kw: self.i18n.gettext(lang, k, **kw)
+        now_utc = datetime.now(timezone.utc)
+        seconds_left = max(0, int((sub.end_date - now_utc).total_seconds()))
+        hours_left = max(1, (seconds_left + 3599) // 3600)
+        days_left = max(1, (seconds_left + 86399) // 86400)
+        try:
+            await self.bot.send_message(
+                sub.user_id,
+                _(
+                    message_key,
+                    user_name=sub.user.first_name or f"User {sub.user_id}",
+                    end_date=sub.end_date.strftime("%Y-%m-%d"),
+                    hours_left=hours_left,
+                    days_left=days_left,
+                ),
+                reply_markup=get_subscribe_only_markup(lang, self.i18n),
+            )
+            await subscription_dal.update_subscription_notification_time(
+                session,
+                sub.subscription_id,
+                now_utc,
+            )
+        except Exception:
+            logging.exception("Failed to send expiry warning to user %s", sub.user_id)
 
     async def _process_addon_traffic_cycle_once(self) -> None:
         if not self._async_session_factory:
@@ -358,6 +465,7 @@ class SubscriptionService:
                 "is_active": True,
                 "status_from_panel": "TRIAL",
                 "traffic_limit_bytes": self.settings.trial_traffic_limit_bytes,
+                "last_notification_sent": None,
                 "auto_renew_enabled": False,
             },
         )
@@ -507,6 +615,7 @@ class SubscriptionService:
                 "is_active": True,
                 "status_from_panel": "ACTIVE",
                 "traffic_limit_bytes": self.settings.user_traffic_limit_bytes,
+                "last_notification_sent": None,
                 "provider": provider,
                 "skip_notifications": False,
                 "auto_renew_enabled": auto_renew_should_enable,
@@ -624,6 +733,7 @@ class SubscriptionService:
                 "status_from_panel": "ACTIVE",
                 "traffic_limit_bytes": 0,
                 "traffic_used_bytes": current_active_sub.traffic_used_bytes if current_active_sub else 0,
+                "last_notification_sent": None,
                 "provider": provider,
                 "skip_notifications": True,
                 "auto_renew_enabled": False,

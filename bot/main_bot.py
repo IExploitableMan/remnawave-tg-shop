@@ -173,9 +173,11 @@ async def on_startup_configured(dispatcher: Dispatcher):
         if subscription_service:
             await subscription_service.setup_addon_traffic_worker(async_session_factory)
             logging.info("STARTUP: Add-on traffic worker initialized")
+            await subscription_service.setup_expiry_warning_worker(async_session_factory)
+            logging.info("STARTUP: Subscription expiry warning worker initialized")
     except Exception as e:
         logging.error(
-            f"STARTUP: Failed to initialize add-on traffic worker: {e}",
+            f"STARTUP: Failed to initialize subscription workers: {e}",
             exc_info=True,
         )
 

@@ -10,6 +10,7 @@ from . import logs_admin
 from . import payments
 from . import ads
 from . import server_reports
+from . import runtime_settings
 
 admin_router_aggregate = Router(name="admin_features_router")
 
@@ -23,5 +24,6 @@ admin_router_aggregate.include_router(logs_admin.router)
 admin_router_aggregate.include_router(payments.router)
 admin_router_aggregate.include_router(ads.router)
 admin_router_aggregate.include_router(server_reports.router)
+admin_router_aggregate.include_router(runtime_settings.router)
 
 __all__ = ("admin_router_aggregate", )

@@ -320,6 +320,41 @@ async def get_subscriptions_near_expiration(
     return result.scalars().all()
 
 
+async def get_subscriptions_due_for_expiry_warning(
+    session: AsyncSession,
+    hours_before: int,
+    *,
+    kind: str,
+    trial: bool,
+    include_skipped: bool = False,
+    limit: int = 200,
+) -> List[Subscription]:
+    now_utc = datetime.now(timezone.utc)
+    threshold_date = now_utc + timedelta(hours=max(0, int(hours_before)))
+    stmt = (
+        select(Subscription)
+        .join(Subscription.user)
+        .where(
+            Subscription.kind == kind,
+            Subscription.is_active == True,
+            Subscription.end_date > now_utc,
+            Subscription.end_date <= threshold_date,
+            Subscription.last_notification_sent == None,
+        )
+        .order_by(Subscription.end_date.asc(), Subscription.subscription_id.asc())
+        .limit(limit)
+        .options(selectinload(Subscription.user))
+    )
+    if not include_skipped:
+        stmt = stmt.where(Subscription.skip_notifications == False)
+    if trial:
+        stmt = stmt.where(Subscription.status_from_panel == "TRIAL")
+    else:
+        stmt = stmt.where(or_(Subscription.status_from_panel != "TRIAL", Subscription.status_from_panel == None))
+    result = await session.execute(stmt)
+    return result.scalars().all()
+
+
 async def update_subscription_notification_time(
     session: AsyncSession,
     subscription_id: int,

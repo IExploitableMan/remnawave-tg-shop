@@ -43,3 +43,6 @@ class AdminStates(StatesGroup):
     waiting_for_ad_source = State()
     waiting_for_ad_start_param = State()
     waiting_for_ad_cost = State()
+
+    # Runtime settings
+    waiting_for_runtime_setting_value = State()

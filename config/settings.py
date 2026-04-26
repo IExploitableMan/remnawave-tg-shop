@@ -198,6 +198,13 @@ class Settings(BaseSettings):
     SUBSCRIPTION_NOTIFY_ON_EXPIRE: bool = Field(default=True)
     SUBSCRIPTION_NOTIFY_AFTER_EXPIRE: bool = Field(default=True)
     SUBSCRIPTION_NOTIFY_DAYS_BEFORE: int = Field(default=3)
+    EXPIRY_WARNING_WORKER_INTERVAL_SECONDS: int = Field(default=900)
+    BASE_EXPIRY_WARNING_ENABLED: bool = Field(default=True)
+    BASE_EXPIRY_WARNING_HOURS_BEFORE: int = Field(default=72)
+    TRIAL_EXPIRY_WARNING_ENABLED: bool = Field(default=True)
+    TRIAL_EXPIRY_WARNING_HOURS_BEFORE: int = Field(default=24)
+    ADDON_EXPIRY_WARNING_ENABLED: bool = Field(default=True)
+    ADDON_EXPIRY_WARNING_HOURS_BEFORE: int = Field(default=24)
 
     REFERRAL_BONUS_DAYS_INVITER_1_MONTH: Optional[int] = Field(
         default=3, alias="REFERRAL_BONUS_DAYS_1_MONTH")

@@ -32,6 +32,9 @@ def get_admin_panel_keyboard(i18n_instance, lang: str,
     # Системные функции
     builder.button(text=_(key="admin_system_functions_section"),
                    callback_data="admin_section:system_functions")
+
+    builder.button(text=_(key="admin_runtime_settings_section"),
+                   callback_data="admin_action:runtime_settings")
     
     builder.adjust(1)
     return builder.as_markup()

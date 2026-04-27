@@ -11,6 +11,7 @@ from db.dal import payment_dal
 from db.models import User
 from db.dal import subscription_dal
 from bot.middlewares.i18n import JsonI18n
+from bot.services.runtime_settings_service import RuntimeSettingsService
 from .subscription_service import SubscriptionService
 
 
@@ -31,7 +32,8 @@ class ReferralService:
         if not getattr(self.settings, "REFERRAL_ENABLED", True):
             return {"inviter_bonus_applied_flag": False}
 
-        inviter_bonus_days = self.settings.REFERRAL_BONUS_DAYS_INVITER_TRIAL
+        runtime_settings = RuntimeSettingsService(self.settings)
+        inviter_bonus_days = await runtime_settings.get_referral_trial_inviter_bonus_days(session)
         if not inviter_bonus_days or inviter_bonus_days <= 0:
             return {"inviter_bonus_applied_flag": False}
 
@@ -169,9 +171,10 @@ class ReferralService:
                 and inviter_user_model.first_name else self.i18n.gettext(
                     default_lang_for_placeholder, "friend_placeholder"))
 
-            inviter_bonus_days = self.settings.referral_bonus_inviter.get(
+            runtime_settings = RuntimeSettingsService(self.settings)
+            inviter_bonus_days = (await runtime_settings.get_referral_bonus_inviter(session)).get(
                 purchased_subscription_months)
-            referee_bonus_days = self.settings.referral_bonus_referee.get(
+            referee_bonus_days = (await runtime_settings.get_referral_bonus_referee(session)).get(
                 purchased_subscription_months)
 
             if inviter_bonus_days and inviter_bonus_days > 0:

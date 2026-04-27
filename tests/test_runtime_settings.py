@@ -42,6 +42,17 @@ class RuntimeSettingsServiceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.service.validate("base_expiry_warning_hours_before", "721")
 
+    def test_referral_factor_accepts_float_values(self):
+        self.assertEqual(self.service.validate("referral_inviter_bonus_factor", "2"), "2")
+        self.assertEqual(self.service.validate("referral_inviter_bonus_factor", "1.5"), "1.5")
+        self.assertEqual(self.service.validate("referral_inviter_bonus_factor", "1,5"), "1.5")
+        with self.assertRaises(ValueError):
+            self.service.validate("referral_inviter_bonus_factor", "-0.1")
+
+    def test_bonus_rounding_uses_half_up_math_rounding(self):
+        self.assertEqual(runtime_module.round_bonus_days(1, 2.4), 2)
+        self.assertEqual(runtime_module.round_bonus_days(1, 2.5), 3)
+
     def test_env_defaults_are_normalized_to_strings(self):
         spec = runtime_module.APP_SETTING_SPECS["addon_expiry_warning_enabled"]
         self.assertEqual(self.service.env_default(spec), "false")
@@ -97,6 +108,27 @@ class RuntimeSettingsPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.service.get_bool(object(), "base_expiry_warning_enabled"))
         self.assertEqual(await self.service.get_int(object(), "base_expiry_warning_hours_before"), 0)
         self.assertEqual(await self.service.get_int(object(), "trial_expiry_warning_hours_before"), 48)
+
+    async def test_referral_bonus_maps_use_saved_days_and_factor(self):
+        class FakeDal:
+            async def get_settings_map(self, session):
+                return {
+                    "referral_inviter_bonus_days_1_month": "1",
+                    "referral_inviter_bonus_days_trial": "1",
+                    "referral_inviter_bonus_factor": "2.5",
+                    "referral_referee_bonus_days_1_month": "1",
+                    "referral_referee_bonus_factor": "2.4",
+                }
+
+        runtime_module.app_settings_dal = FakeDal()
+
+        inviter = await self.service.get_referral_bonus_inviter(object())
+        referee = await self.service.get_referral_bonus_referee(object())
+        trial = await self.service.get_referral_trial_inviter_bonus_days(object())
+
+        self.assertEqual(inviter[1], 3)
+        self.assertEqual(referee[1], 2)
+        self.assertEqual(trial, 3)
 
     async def test_set_value_validates_and_writes_normalized_value(self):
         calls = []

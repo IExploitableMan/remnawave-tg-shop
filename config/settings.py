@@ -232,6 +232,8 @@ class Settings(BaseSettings):
         default=7, alias="REFEREE_BONUS_DAYS_6_MONTHS")
     REFERRAL_BONUS_DAYS_REFEREE_12_MONTHS: Optional[int] = Field(
         default=15, alias="REFEREE_BONUS_DAYS_12_MONTHS")
+    REFERRAL_BONUS_FACTOR_INVITER: float = Field(default=1.0)
+    REFERRAL_BONUS_FACTOR_REFEREE: float = Field(default=1.0)
 
     # Referral program configuration
     REFERRAL_ONE_BONUS_PER_REFEREE: bool = Field(

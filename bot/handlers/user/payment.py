@@ -21,14 +21,17 @@ from bot.services.lknpd_service import LknpdService
 from bot.middlewares.i18n import JsonI18n
 from config.settings import Settings
 from bot.services.notification_service import NotificationService
-from bot.keyboards.inline.user_keyboards import get_connect_and_main_keyboard
+from bot.keyboards.inline.user_keyboards import (
+    get_channel_subscription_keyboard,
+    get_connect_and_main_keyboard,
+)
 from bot.utils.product_offers import (
     is_traffic_payment_kind,
     normalize_payment_kind,
 )
 from bot.utils.product_kinds import PAYMENT_KIND_ADDON_SUBSCRIPTION, PAYMENT_KIND_BASE_SUBSCRIPTION
 from bot.utils.text_sanitizer import sanitize_display_name, username_for_display
-from bot.utils.config_link import prepare_config_links
+from bot.utils.paid_link_gate import prepare_paid_config_links
 
 YOOKASSA_EVENT_PAYMENT_SUCCEEDED = 'payment.succeeded'
 YOOKASSA_EVENT_PAYMENT_CANCELED = 'payment.canceled'
@@ -428,8 +431,13 @@ async def process_successful_payment(session: AsyncSession, bot: Bot,
                     "Failed to send LKNPD receipt for payment %s",
                     yk_payment_id_from_hook,
                 )
-        config_link_display, connect_button_url = await prepare_config_links(
-            settings, activation_details.get("subscription_url") if activation_details else None
+        config_link_display, connect_button_url, link_blocked_by_channel = await prepare_paid_config_links(
+            settings,
+            session,
+            user_id,
+            i18n,
+            user_lang,
+            activation_details.get("subscription_url") if activation_details else None,
         )
         config_link_text = config_link_display or _("config_link_not_available")
         # For auto-renew charges, avoid re-sending config link; send concise message
@@ -447,13 +455,17 @@ async def process_successful_payment(session: AsyncSession, bot: Bot,
                 end_date=final_end_date_for_user.strftime('%Y-%m-%d') if final_end_date_for_user else "-",
                 config_link=config_link_text,
             )
-            details_markup = get_connect_and_main_keyboard(
-                user_lang,
-                i18n,
-                settings,
-                config_link_display,
-                connect_button_url=connect_button_url,
-                preserve_message=True,
+            details_markup = (
+                get_channel_subscription_keyboard(user_lang, i18n, settings.REQUIRED_CHANNEL_LINK)
+                if link_blocked_by_channel
+                else get_connect_and_main_keyboard(
+                    user_lang,
+                    i18n,
+                    settings,
+                    config_link_display,
+                    connect_button_url=connect_button_url,
+                    preserve_message=True,
+                )
             )
         elif payment_kind == PAYMENT_KIND_ADDON_SUBSCRIPTION:
             details_message = _(
@@ -466,13 +478,17 @@ async def process_successful_payment(session: AsyncSession, bot: Bot,
                     "addon_purchase_base_shorter_warning",
                     base_end_date=base_subscription_end_date.strftime('%Y-%m-%d') if base_subscription_end_date else "-",
                 )
-            details_markup = get_connect_and_main_keyboard(
-                user_lang,
-                i18n,
-                settings,
-                config_link_display,
-                connect_button_url=connect_button_url,
-                preserve_message=True,
+            details_markup = (
+                get_channel_subscription_keyboard(user_lang, i18n, settings.REQUIRED_CHANNEL_LINK)
+                if link_blocked_by_channel
+                else get_connect_and_main_keyboard(
+                    user_lang,
+                    i18n,
+                    settings,
+                    config_link_display,
+                    connect_button_url=connect_button_url,
+                    preserve_message=True,
+                )
             )
         else:
             if applied_referee_bonus_days_from_referral and final_end_date_for_user:
@@ -517,13 +533,17 @@ async def process_successful_payment(session: AsyncSession, bot: Bot,
                 )
                 details_message = _("payment_successful_error_details")
 
-            details_markup = get_connect_and_main_keyboard(
-                user_lang,
-                i18n,
-                settings,
-                config_link_display,
-                connect_button_url=connect_button_url,
-                preserve_message=True,
+            details_markup = (
+                get_channel_subscription_keyboard(user_lang, i18n, settings.REQUIRED_CHANNEL_LINK)
+                if link_blocked_by_channel
+                else get_connect_and_main_keyboard(
+                    user_lang,
+                    i18n,
+                    settings,
+                    config_link_display,
+                    connect_button_url=connect_button_url,
+                    preserve_message=True,
+                )
             )
         try:
             await bot.send_message(

@@ -25,6 +25,7 @@ from bot.services.promo_code_service import PromoCodeService
 from config.settings import Settings
 from bot.middlewares.i18n import JsonI18n
 from bot.utils.text_sanitizer import sanitize_username, sanitize_display_name
+from bot.utils.channel_gate import should_enforce_channel_subscription_gate
 from bot.services.server_report_service import report_cooldown_until
 
 router = Router(name="user_start_router")
@@ -176,6 +177,14 @@ async def ensure_required_channel_subscription(
         return False
 
     if user_id in settings.ADMIN_IDS:
+        return True
+
+    should_enforce = await should_enforce_channel_subscription_gate(
+        settings,
+        session,
+        user_id,
+    )
+    if not should_enforce:
         return True
 
     if db_user is None:

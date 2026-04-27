@@ -5,6 +5,7 @@
   "channel_subscription_verify_button": "Проверить подписку",
   "channel_subscription_check_failed": "Не удалось проверить подписку. Попробуйте позже или обратитесь в поддержку.",
   "channel_subscription_verified_success": "✅ Подписка подтверждена! Можно продолжать.",
+  "config_link_requires_channel_subscription": "Ссылка на VPN будет доступна после подписки на канал и нажатия \"Проверить подписку\". Это необходимо для своевременного информирования о важных обновлениях и изменениях в работе сервиса. Обещаем не спамить.",
   "main_menu_greeting": "Привет, {user_name}! 👋\nЧто бы вы хотели сделать?",
   "menu_activate_trial_button": "🆓 Пробный период",
   "menu_subscribe_inline": "🚀 Купить",

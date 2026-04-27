@@ -18,9 +18,12 @@ from .subscription_service import SubscriptionService
 from .referral_service import ReferralService
 from bot.middlewares.i18n import JsonI18n
 from .notification_service import NotificationService
-from bot.keyboards.inline.user_keyboards import get_connect_and_main_keyboard
+from bot.keyboards.inline.user_keyboards import (
+    get_channel_subscription_keyboard,
+    get_connect_and_main_keyboard,
+)
 from bot.utils.text_sanitizer import sanitize_display_name, username_for_display
-from bot.utils.config_link import prepare_config_links
+from bot.utils.paid_link_gate import prepare_paid_config_links
 
 
 class StarsService:
@@ -209,7 +212,14 @@ class StarsService:
         _ = lambda k, **kw: i18n.gettext(current_lang, k, **kw) if i18n else k
 
         raw_config_link = activation_details.get("subscription_url") if activation_details else None
-        config_link_display, connect_button_url = await prepare_config_links(self.settings, raw_config_link)
+        config_link_display, connect_button_url, link_blocked_by_channel = await prepare_paid_config_links(
+            self.settings,
+            session,
+            message.from_user.id,
+            i18n,
+            current_lang,
+            raw_config_link,
+        )
         config_link_text = config_link_display or _("config_link_not_available")
 
         if is_traffic_payment_kind(sale_mode):
@@ -257,13 +267,17 @@ class StarsService:
                 end_date=final_end.strftime('%Y-%m-%d'),
                 config_link=config_link_text,
             )
-        markup = get_connect_and_main_keyboard(
-            current_lang,
-            i18n,
-            self.settings,
-            config_link_display,
-            connect_button_url=connect_button_url,
-            preserve_message=True,
+        markup = (
+            get_channel_subscription_keyboard(current_lang, i18n, self.settings.REQUIRED_CHANNEL_LINK)
+            if link_blocked_by_channel
+            else get_connect_and_main_keyboard(
+                current_lang,
+                i18n,
+                self.settings,
+                config_link_display,
+                connect_button_url=connect_button_url,
+                preserve_message=True,
+            )
         )
         try:
             await self.bot.send_message(

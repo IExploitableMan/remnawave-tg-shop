@@ -30,6 +30,13 @@ class Settings(BaseSettings):
         default=False,
         description="Require users to subscribe to REQUIRED_CHANNEL_ID before using the bot",
     )
+    REQUIRED_CHANNEL_SUBSCRIPTION_MODE: str = Field(
+        default="immediate",
+        description=(
+            "Required channel gate mode: 'immediate' blocks before bot usage, "
+            "'after_paid_subscription' starts blocking only after a paid subscription exists"
+        ),
+    )
     REQUIRED_CHANNEL_ID: Optional[int] = Field(
         default=None,
         description="Telegram channel ID the user must join to access the bot")
@@ -794,6 +801,18 @@ class Settings(BaseSettings):
         if not cleaned.startswith("/"):
             cleaned = f"/{cleaned}"
         return cleaned
+
+    @field_validator('REQUIRED_CHANNEL_SUBSCRIPTION_MODE', mode='before')
+    @classmethod
+    def normalize_required_channel_subscription_mode(cls, v):
+        if not isinstance(v, str):
+            return "immediate"
+        cleaned = v.strip().lower()
+        if cleaned in {"after_paid", "after_payment", "paid", "post_paid"}:
+            return "after_paid_subscription"
+        if cleaned == "after_paid_subscription":
+            return "after_paid_subscription"
+        return "immediate"
 
     @field_validator(
         'REQUIRED_CHANNEL_LINK',

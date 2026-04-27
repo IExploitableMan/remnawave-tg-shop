@@ -15,7 +15,10 @@ from bot.middlewares.i18n import JsonI18n
 from bot.services.subscription_service import SubscriptionService
 from bot.services.referral_service import ReferralService
 from bot.services.notification_service import NotificationService
-from bot.keyboards.inline.user_keyboards import get_connect_and_main_keyboard
+from bot.keyboards.inline.user_keyboards import (
+    get_channel_subscription_keyboard,
+    get_connect_and_main_keyboard,
+)
 from bot.utils.product_offers import (
     is_traffic_payment_kind,
     normalize_payment_kind,
@@ -24,7 +27,7 @@ from bot.utils.product_offers import (
 from bot.utils.product_kinds import PAYMENT_KIND_ADDON_SUBSCRIPTION, PAYMENT_KIND_BASE_SUBSCRIPTION
 from db.dal import payment_dal, user_dal
 from bot.utils.text_sanitizer import sanitize_display_name, username_for_display
-from bot.utils.config_link import prepare_config_links
+from bot.utils.paid_link_gate import prepare_paid_config_links
 
 
 class SeverPayService:
@@ -334,7 +337,14 @@ class SeverPayService:
                 _ = lambda k, **kw: self.i18n.gettext(lang, k, **kw) if self.i18n else k
 
                 raw_config_link = activation.get("subscription_url") if activation else None
-                config_link_display, connect_button_url = await prepare_config_links(self.settings, raw_config_link)
+                config_link_display, connect_button_url, link_blocked_by_channel = await prepare_paid_config_links(
+                    self.settings,
+                    session,
+                    payment.user_id,
+                    self.i18n,
+                    lang,
+                    raw_config_link,
+                )
                 config_link_text = config_link_display or _("config_link_not_available")
                 final_end = activation.get("end_date") if activation else None
                 applied_days = 0
@@ -395,13 +405,17 @@ class SeverPayService:
                         config_link=config_link_text,
                     )
 
-                markup = get_connect_and_main_keyboard(
-                    lang,
-                    self.i18n,
-                    self.settings,
-                    config_link_display,
-                    connect_button_url=connect_button_url,
-                    preserve_message=True,
+                markup = (
+                    get_channel_subscription_keyboard(lang, self.i18n, self.settings.REQUIRED_CHANNEL_LINK)
+                    if link_blocked_by_channel
+                    else get_connect_and_main_keyboard(
+                        lang,
+                        self.i18n,
+                        self.settings,
+                        config_link_display,
+                        connect_button_url=connect_button_url,
+                        preserve_message=True,
+                    )
                 )
                 try:
                     await self.bot.send_message(

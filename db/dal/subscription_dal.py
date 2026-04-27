@@ -290,6 +290,28 @@ async def has_any_subscription_for_user(
     return result.scalar_one_or_none() is not None
 
 
+async def has_paid_subscription_for_user(
+    session: AsyncSession,
+    user_id: int,
+    kind: Optional[str] = None,
+    active_only: bool = False,
+) -> bool:
+    stmt = select(Subscription.subscription_id).where(
+        Subscription.user_id == user_id,
+        Subscription.provider.is_not(None),
+    )
+    if kind:
+        stmt = stmt.where(Subscription.kind == kind)
+    if active_only:
+        stmt = stmt.where(
+            Subscription.is_active == True,
+            Subscription.end_date > datetime.now(timezone.utc),
+        )
+    stmt = stmt.limit(1)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none() is not None
+
+
 async def get_subscriptions_near_expiration(
     session: AsyncSession,
     days_threshold: int,

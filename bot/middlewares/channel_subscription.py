@@ -13,6 +13,7 @@ from config.settings import Settings
 from db.dal import user_dal
 from bot.middlewares.i18n import JsonI18n
 from bot.keyboards.inline.user_keyboards import get_channel_subscription_keyboard
+from bot.utils.channel_gate import should_enforce_channel_subscription_gate
 
 
 class ChannelSubscriptionMiddleware(BaseMiddleware):
@@ -73,6 +74,14 @@ class ChannelSubscriptionMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         if not db_user:
+            return await handler(event, data)
+
+        should_enforce = await should_enforce_channel_subscription_gate(
+            self.settings,
+            session,
+            event_user.id,
+        )
+        if not should_enforce:
             return await handler(event, data)
 
         if (

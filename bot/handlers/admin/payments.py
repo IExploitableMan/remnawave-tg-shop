@@ -53,6 +53,7 @@ def format_payment_text(payment: Payment, i18n: JsonI18n, lang: str, settings: S
         'pending',
         'pending_yookassa',
         'pending_freekassa',
+        'pending_rollypay',
         'pending_platega',
         'pending_severpay',
         'pending_cryptopay',
@@ -74,6 +75,7 @@ def format_payment_text(payment: Payment, i18n: JsonI18n, lang: str, settings: S
         'telegram_stars': 'Telegram Stars',
         'cryptopay': 'CryptoPay',
         'freekassa': 'FreeKassa',
+        'rollypay': 'RollyPay',
         'severpay': 'SeverPay',
         'platega': 'Platega',
     }.get(payment.provider, payment.provider or 'Unknown')

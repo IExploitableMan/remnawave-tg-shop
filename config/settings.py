@@ -124,6 +124,18 @@ class Settings(BaseSettings):
     PLATEGA_RETURN_URL: Optional[str] = Field(default=None)
     PLATEGA_FAILED_URL: Optional[str] = Field(default=None)
 
+    ROLLYPAY_ENABLED: bool = Field(default=False)
+    ROLLYPAY_API_KEY: Optional[str] = None
+    ROLLYPAY_SIGNING_SECRET: Optional[str] = None
+    ROLLYPAY_BASE_URL: str = Field(default="https://rollypay.io")
+    ROLLYPAY_PAYMENT_METHOD: Optional[str] = Field(
+        default=None,
+        description="Optional RollyPay payment method (e.g. sbp, card, crypto). Leave empty to let the provider choose.",
+    )
+    ROLLYPAY_RETURN_URL: Optional[str] = Field(default=None)
+    ROLLYPAY_SUCCESS_URL: Optional[str] = Field(default=None)
+    ROLLYPAY_FAIL_URL: Optional[str] = Field(default=None)
+
     FREEKASSA_ENABLED: bool = Field(default=False)
     FREEKASSA_MERCHANT_ID: Optional[str] = None
     FREEKASSA_FIRST_SECRET: Optional[str] = None
@@ -151,7 +163,7 @@ class Settings(BaseSettings):
     )
     PAYMENT_METHODS_ORDER: Optional[str] = Field(
         default=None,
-        description="Comma-separated list of payment methods to show (e.g., severpay,freekassa,yookassa,platega,stars,cryptopay)",
+        description="Comma-separated list of payment methods to show (e.g., severpay,freekassa,yookassa,rollypay,platega,stars,cryptopay)",
     )
 
     MONTH_1_ENABLED: bool = Field(default=True, alias="1_MONTH_ENABLED")
@@ -481,6 +493,19 @@ class Settings(BaseSettings):
             return f"{base.rstrip('/')}{self.platega_webhook_path}"
         return None
 
+    @computed_field
+    @property
+    def rollypay_webhook_path(self) -> str:
+        return "/webhook/rollypay"
+
+    @computed_field
+    @property
+    def rollypay_full_webhook_url(self) -> Optional[str]:
+        base = self.WEBHOOK_BASE_URL
+        if base:
+            return f"{base.rstrip('/')}{self.rollypay_webhook_path}"
+        return None
+
     # Effective YooKassa receipt fields.
     # Explicit .env values win; otherwise keep sensible defaults derived from the recurring toggle.
     @computed_field
@@ -721,6 +746,7 @@ class Settings(BaseSettings):
         """
         default_order = [
             "freekassa",
+            "rollypay",
             "platega",
             "severpay",
             "yookassa",

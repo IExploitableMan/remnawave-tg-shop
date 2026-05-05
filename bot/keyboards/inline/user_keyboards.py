@@ -251,6 +251,11 @@ def get_payment_method_keyboard(months: int, price: float,
                 text=_("pay_with_severpay_button"),
                 callback_data=f"pay_severpay:{value_str}:{price}{mode_suffix}",
             )
+        elif method == "rollypay" and getattr(settings, "ROLLYPAY_ENABLED", False):
+            builder.button(
+                text=_("pay_with_rollypay_button"),
+                callback_data=f"pay_rollypay:{value_str}:{price}{mode_suffix}",
+            )
         elif method == "freekassa" and settings.FREEKASSA_ENABLED:
             builder.button(
                 text=_("pay_with_sbp_button"),

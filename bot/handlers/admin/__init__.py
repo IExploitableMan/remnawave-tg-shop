@@ -11,9 +11,11 @@ from . import payments
 from . import ads
 from . import server_reports
 from . import runtime_settings
+from . import infrastructure
 
 admin_router_aggregate = Router(name="admin_features_router")
 
+admin_router_aggregate.include_router(infrastructure.router)
 admin_router_aggregate.include_router(common.router)
 admin_router_aggregate.include_router(broadcast.router)
 admin_router_aggregate.include_router(promo_router_aggregate)

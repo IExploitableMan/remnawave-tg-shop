@@ -36,6 +36,8 @@ def get_admin_panel_keyboard(i18n_instance, lang: str,
     builder.button(text=_(key="admin_runtime_settings_section"),
                    callback_data="admin_action:runtime_settings")
     
+    if settings.INFRA_ENABLED:
+        builder.button(text="Инфраструктура" if lang == "ru" else "Infrastructure", callback_data="infra:home")
     builder.adjust(1)
     return builder.as_markup()
 

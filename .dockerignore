@@ -90,3 +90,6 @@ venv/
 
 # VS Code
 .vscode/
+
+infra-data
+tg-mini-app

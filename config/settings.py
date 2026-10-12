@@ -263,6 +263,11 @@ class Settings(BaseSettings):
 
     PANEL_API_URL: Optional[str] = None
     PANEL_API_KEY: Optional[str] = None
+    PANEL_API_VERSION: str = "auto"  # auto, 2, or 3
+    INFRA_ENABLED: bool = False
+    INFRA_ENCRYPTION_KEY: Optional[str] = None
+    INFRA_SSH_PRIVATE_KEY: Optional[str] = None
+    INFRA_ARTIFACT_DIR: str = "/app/infra-data"
     USER_TRAFFIC_LIMIT_GB: Optional[float] = Field(default=0.0)
     USER_TRAFFIC_STRATEGY: str = Field(default="NO_RESET")
     USER_SQUAD_UUIDS: Optional[str] = Field(

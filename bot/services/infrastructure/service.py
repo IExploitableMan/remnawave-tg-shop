@@ -1,0 +1,422 @@
+import asyncio
+import html
+import json
+import logging
+import re
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from cryptography.fernet import Fernet
+from sqlalchemy import select, text, func
+from aiogram.types import FSInputFile
+
+from db.models import (InfrastructureNode as Node, InfrastructureDeployment as Deployment,
+                       InfrastructureJob as Job, InfrastructureReport as Report)
+from db.dal import app_settings_dal
+from bot.services.panel_infrastructure_api import PanelInfrastructureApi
+from .settings import read_config, choose_sni, validate_address
+
+
+def utcnow():
+    return datetime.now(timezone.utc)
+
+
+def country_flag(code):
+    return ''.join(chr(127397 + ord(c)) for c in code.upper())
+
+
+class InfrastructureService:
+    def __init__(self, settings, panel, bot, session_factory):
+        self.settings, self.panel, self.bot = settings, panel, bot
+        self.api = PanelInfrastructureApi(panel)
+        self.factory = session_factory
+        self.scope = panel.identities.scope
+        self.task = None
+        self.current = None
+        self._last_billing_check = 0
+        self._snapshot_lock = asyncio.Lock()
+
+    def cipher(self):
+        key = self.settings.INFRA_ENCRYPTION_KEY
+        if not key:
+            raise ValueError('Не настроен ключ хранения доступов INFRA_ENCRYPTION_KEY')
+        return Fernet(key.encode())
+
+    async def nodes(self, session):
+        return (await session.execute(select(Node).where(
+            Node.panel_scope == self.scope, Node.deleted.is_(False)).order_by(Node.id))).scalars().all()
+
+    async def node(self, session, node_id):
+        node = await session.get(Node, int(node_id))
+        if not node or node.panel_scope != self.scope or node.deleted:
+            raise ValueError('Нода не найдена')
+        return node
+
+    async def deployment(self, session, node_id):
+        return (await session.execute(select(Deployment).where(Deployment.node_id == node_id,
+            Deployment.state == 'active').order_by(Deployment.id.desc()).limit(1))).scalar_one_or_none()
+
+    async def enqueue(self, session, node, deployment, kind, admin_id):
+        if kind == 'provision' and deployment.state in {'replaced', 'superseded'}:
+            raise ValueError('Этот VPS уже заменён. Используйте текущую карточку ноды.')
+        if (await session.execute(select(Job.id).where(Job.node_id == node.id,
+            Job.status.in_(['pending', 'running'])))).first():
+            raise ValueError('У этой ноды уже есть активное задание')
+        job = Job(node_id=node.id, deployment_id=deployment.id, kind=kind, requested_by=admin_id)
+        session.add(job)
+        await session.flush()
+        return job
+
+    async def schedule_key_updates(self, session, admin_id):
+        """Persist propagation requests, including nodes busy with another job."""
+        await session.execute(text('SELECT pg_advisory_xact_lock(74120303)'))
+        waiting = []
+        nodes = await self.nodes(session)
+        for node in nodes:
+            await app_settings_dal.upsert_setting(session,
+                f'infra.keys.{self.scope}.{node.id}', str(admin_id))
+            if not await self.deployment(session, node.id):
+                waiting.append(node.name)
+        return len(nodes), waiting
+
+    async def enqueue_pending_keys(self):
+        async with self.factory() as session:
+            await session.execute(text('SELECT pg_advisory_xact_lock(74120303)'))
+            for node in await self.nodes(session):
+                marker = await app_settings_dal.get_setting(session, f'infra.keys.{self.scope}.{node.id}')
+                if not marker or marker.value == '0':
+                    continue
+                deployment = await self.deployment(session, node.id)
+                busy = (await session.execute(select(Job.id).where(Job.node_id == node.id,
+                    Job.status.in_(['pending', 'running'])))).first()
+                if deployment and not busy:
+                    await self.enqueue(session, node, deployment, 'keys', int(marker.value))
+                    marker.value = '0'
+            await session.commit()
+
+    async def prepare(self, session, values, admin_id, replace_id=None):
+        # The DB lock serializes allocation across bot instances as well as FSMs.
+        await session.execute(text('SELECT pg_advisory_xact_lock(74120301)'))
+        config = await read_config(session)
+        if not config['profile_uuid'] or not config['inbound_uuid'] or not config['panel_ip']:
+            raise ValueError('Сначала выберите профиль/inbound и IP панели в настройках инфраструктуры')
+        validate_address(values['address'])
+        if not 1 <= int(values['period_days']) <= 3650:
+            raise ValueError('Срок: от 1 до 3650 дней')
+        if not re.fullmatch(r'[A-Z]{2}', values['country']):
+            raise ValueError('Страна: двухбуквенный код')
+        duplicates = (await session.execute(select(Deployment.node_id).join(Node, Node.id == Deployment.node_id).where(
+            Node.panel_scope == self.scope, Node.deleted.is_(False),
+            Deployment.address == values['address'], Deployment.state.in_(['active', 'pending'])))).scalars().all()
+        if any(node_id != replace_id for node_id in duplicates):
+            raise ValueError('Этот адрес уже используется другой нодой или заданием')
+        selected_provider = (await self.node(session, replace_id)).provider_uuid if replace_id else values['provider_uuid']
+        if not any(p['uuid'] == selected_provider for p in await self.api.providers()):
+            raise ValueError('Провайдер ноды отсутствует в Infra Billing')
+        all_panel = await self.api.nodes()
+        if replace_id:
+            node = await self.node(session, replace_id)
+            node.period_days = int(values['period_days'])
+            stale = (await session.execute(select(Deployment).where(
+                Deployment.node_id == node.id, Deployment.state == 'pending'))).scalars().all()
+            for item in stale:
+                item.state = 'superseded'
+        else:
+            names = [n['name'] for n in all_panel] + [n.name for n in await self.nodes(session)]
+            max_number = max([int(m[1]) for name in names if (m := re.match(r'^node(\d+)(?:\b|\s)', name, re.I))] or [0])
+            old = await app_settings_dal.get_setting(session, f'infra.number.{self.scope}')
+            number = max(max_number, int(old.value) if old else 0) + 1
+            await app_settings_dal.upsert_setting(session, f'infra.number.{self.scope}', str(number))
+            node = Node(panel_scope=self.scope, name=f"node{number} ({values['country']})",
+                        country=values['country'], provider_uuid=values['provider_uuid'],
+                        period_days=int(values['period_days']))
+            session.add(node)
+            await session.flush()
+        deployments = (await session.execute(select(Deployment).join(Node, Node.id == Deployment.node_id).where(
+            Node.panel_scope == self.scope, Node.deleted.is_(False), Deployment.state.in_(['active', 'pending'])))).scalars().all()
+        pool = config['sni_ru'] if node.country == 'RU' else config['sni_other']
+        deployment = Deployment(node_id=node.id, address=values['address'],
+            host_address=values.get('host_address') or values['address'],
+            ssh_port=int(values.get('ssh_port', 22)), ssh_user=values.get('ssh_user', 'root'),
+            credentials=self.cipher().encrypt(values['password'].encode()).decode(),
+            host_public_key=values['host_public_key'],
+            profile_uuid=config['profile_uuid'], inbound_uuid=config['inbound_uuid'],
+            sni=choose_sni(pool, deployments),
+            node_version=config[f'node_version_{await self.panel.api_major()}'],
+            paid_until=utcnow() + timedelta(days=int(values['period_days'])))
+        session.add(deployment)
+        await session.flush()
+        job = await self.enqueue(session, node, deployment, 'provision', admin_id)
+        return node, job
+
+    async def adopt(self, session, panel_uuid):
+        """Import a panel node without guessing host association or SSH access."""
+        await session.execute(text('SELECT pg_advisory_xact_lock(74120301)'))
+        node_data = next((n for n in await self.api.nodes() if n['uuid'] == panel_uuid), None)
+        if not node_data:
+            raise ValueError('Нода панели не найдена')
+        hosts = await self.panel.get_all_hosts()
+        if hosts is None:
+            raise RuntimeError('Не удалось получить hosts')
+        candidates = [h for h in hosts if h.get('nodes') == [panel_uuid]]
+        node = Node(panel_scope=self.scope, panel_uuid=panel_uuid,
+                    host_uuid=candidates[0]['uuid'] if len(candidates) == 1 else None,
+                    name=node_data['name'], country=node_data['countryCode'],
+                    provider_uuid=node_data.get('providerUuid') or '', period_days=30)
+        session.add(node)
+        await session.flush()
+        billing = await self.api.billing()
+        entry = next((b for b in billing.get('billingNodes', []) if (b.get('nodeUuid') == panel_uuid or
+                     (b.get('node') or {}).get('uuid') == panel_uuid)), None)
+        if entry:
+            node.billing_uuid = entry['uuid']
+            if not node.provider_uuid:
+                node.provider_uuid = entry['providerUuid']
+        return node
+
+    async def extend(self, session, node, days, amount=None):
+        if amount is not None and (not 0 <= amount <= 100000000):
+            raise ValueError('Некорректная сумма')
+        if not 1 <= days <= 3650:
+            raise ValueError('Срок: от 1 до 3650 дней')
+        if not node.billing_uuid:
+            raise ValueError('Нода ещё не подключена к Infra Billing')
+        billing = await self.api.billing()
+        entry = next((b for b in billing.get('billingNodes', []) if b['uuid'] == node.billing_uuid), None)
+        if not entry:
+            raise ValueError('Запись Infra Billing отсутствует')
+        old = datetime.fromisoformat(entry['nextBillingAt'].replace('Z', '+00:00'))
+        deadline = max(old, utcnow()) + timedelta(days=days)
+        await self.api.call('PATCH', '/infra-billing/nodes', {'uuids': [node.billing_uuid], 'nextBillingAt': deadline.isoformat()})
+        node.period_days = days
+        deployment = await self.deployment(session, node.id)
+        if deployment:
+            deployment.paid_until = deadline
+        if amount is not None:
+            if amount < 0:
+                raise ValueError('Стоимость не может быть отрицательной')
+            await self.api.call('POST', '/infra-billing/history', {'providerUuid': node.provider_uuid,
+                'amount': amount, 'billedAt': utcnow().isoformat()})
+        await self.restore_host_access(session, node)
+        return deadline
+
+    async def restore_host_access(self, session, node):
+        if node.excluded_tg and node.host_uuid:
+            hosts = await self.panel.get_all_hosts()
+            host = next((h for h in hosts or [] if h['uuid'] == node.host_uuid), None)
+            if host:
+                saved = json.loads(node.previous_host_access)
+                major = await self.panel.api_major()
+                previous = self.api.access_for_version(saved.get('before', saved), major)
+                expected = saved.get('after')
+                if expected is not None:
+                    expected = self.api.access_for_version(expected, major)
+                if expected is None or all(host.get(key) == value for key, value in expected.items()):
+                    await self.api.call('PATCH', '/hosts', dict(previous, uuid=node.host_uuid))
+                node.excluded_tg = False
+                node.previous_host_access = None
+
+    async def delete(self, session, node):
+        active = (await session.execute(select(Job.id).where(Job.node_id == node.id,
+                  Job.status.in_(['pending', 'running'])))).first()
+        if active:
+            raise ValueError('Сначала остановите активное задание')
+        for path in ([f'/hosts/{node.host_uuid}'] if node.host_uuid else []) + (
+                     [f'/infra-billing/nodes/{node.billing_uuid}'] if node.billing_uuid else []) + (
+                     [f'/nodes/{node.panel_uuid}'] if node.panel_uuid else []):
+            result = await self.panel._request('DELETE', path)
+            if not result or (result.get('error') and result.get('status_code') != 404):
+                raise RuntimeError('Не удалось удалить один из объектов; повторите операцию')
+        node.deleted = True  # keep deployment/test history
+
+    async def snapshot(self, session, node_id=None):
+        nodes = [await self.node(session, node_id)] if node_id else await self.nodes(session)
+        sections = []
+        for node in nodes:
+            deployment = await self.deployment(session, node.id)
+            if not deployment:
+                continue
+            password = self.cipher().decrypt(deployment.credentials.encode()).decode()
+            command_host = f'[{deployment.address}]' if ':' in deployment.address else deployment.address
+            command = f'ssh {deployment.ssh_user}@{command_host}'
+            if deployment.ssh_port != 22:
+                command += f' -p {deployment.ssh_port}'
+            lines = [f'{country_flag(node.country)} {html.escape(node.name)}']
+            lines += [f'<code>{html.escape(v)}</code>' for v in [deployment.address, password, command]]
+            sections.append('\n'.join(lines))
+        messages, current = [], ''
+        for section in sections:
+            if len(current) + len(section) > 3500:
+                messages.append(current); current = ''
+            current += ('\n\n' if current else '') + section
+        if current:
+            messages.append(current)
+        return messages or ['Нет сохранённых доступов.']
+
+    async def publish_snapshots(self, all_admins=True, admin_id=None):
+        async with self._snapshot_lock:
+            for recipient in (self.settings.ADMIN_IDS if all_admins else [admin_id]):
+                try:
+                    async with self.factory() as session:
+                        texts = await self.snapshot(session)
+                        key = f'infra.snapshot.{recipient}.{self.scope}'
+                        row = await app_settings_dal.get_setting(session, key)
+                        previous = json.loads(row.value) if row else []
+                        ids = []
+                        for index, content in enumerate(texts):
+                            old_id = previous[index] if index < len(previous) else None
+                            if old_id:
+                                try:
+                                    await self.bot.edit_message_text(content, chat_id=recipient, message_id=old_id)
+                                    ids.append(old_id); continue
+                                except Exception as exc:
+                                    if 'message is not modified' in str(exc):
+                                        ids.append(old_id); continue
+                            sent = await self.bot.send_message(recipient, content)
+                            ids.append(sent.message_id)
+                        for old_id in previous[len(texts):]:
+                            try:
+                                await self.bot.edit_message_text('Список доступов обновлён в предыдущем сообщении.',
+                                    chat_id=recipient, message_id=old_id)
+                            except Exception:
+                                pass
+                        await app_settings_dal.upsert_setting(session, key, json.dumps(ids))
+                        await session.commit()
+                except Exception:
+                    logging.warning('Cannot deliver infrastructure credentials to admin %s', recipient)
+
+    async def start(self):
+        if not self.settings.INFRA_SSH_PRIVATE_KEY:
+            import asyncssh
+            directory = Path(self.settings.INFRA_ARTIFACT_DIR)
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path = directory / 'automation_key'
+            if not path.exists():
+                with path.open('xb') as stream:
+                    path.chmod(0o600)
+                    stream.write(asyncssh.generate_private_key('ssh-ed25519').export_private_key())
+            self.settings.INFRA_SSH_PRIVATE_KEY = str(path)
+        self.cipher()  # fail before accepting any secret-bearing workflow
+        self.task = asyncio.create_task(self.worker(), name='infrastructure-worker')
+
+    async def close(self):
+        if self.task:
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+
+    async def worker(self):
+        # Session-level advisory lock elects one worker for all bot instances.
+        from .provisioning import run_job
+        while True:
+            try:
+                async with self.factory() as lease:
+                    locked = (await lease.execute(text('SELECT pg_try_advisory_lock(74120302)'))).scalar()
+                    if not locked:
+                        await asyncio.sleep(10); continue
+                    try:
+                        while True:
+                            # Preserve queued jobs while the panel starts or is unavailable.
+                            await self.api.call('GET', '/system/metadata')
+                            await self.enqueue_pending_keys()
+                            async with self.factory() as session:
+                                job = (await session.execute(select(Job).join(Node, Node.id == Job.node_id).where(
+                                    Node.panel_scope == self.scope, Job.status.in_(['pending', 'running'])).order_by(Job.id).limit(1))).scalar_one_or_none()
+                                if job:
+                                    if job.status == 'running':
+                                        job.status, job.result = 'interrupted', 'Задание прервано перезапуском. Можно повторить.'
+                                        await session.commit()
+                                    else:
+                                        job.status = 'running'
+                                        await session.commit()
+                                        self.current = asyncio.create_task(run_job(self, job.id))
+                                        try:
+                                            while not self.current.done():
+                                                await asyncio.sleep(2)
+                                                try:
+                                                    await self.check_billing()
+                                                except Exception:
+                                                    logging.exception('Infrastructure billing check failed')
+                                                async with self.factory() as cancel_session:
+                                                    row = await cancel_session.get(Job, job.id)
+                                                    if row.cancel_requested:
+                                                        self.current.cancel()
+                                            await self.current
+                                        except asyncio.CancelledError:
+                                            async with self.factory() as stopped:
+                                                row = await stopped.get(Job, job.id)
+                                                row.status = 'interrupted' if asyncio.current_task().cancelling() else 'cancelled'
+                                                await stopped.commit()
+                                            if asyncio.current_task().cancelling():
+                                                raise
+                                        finally:
+                                            if self.current and not self.current.done():
+                                                self.current.cancel()
+                                                await asyncio.gather(self.current, return_exceptions=True)
+                                            self.current = None
+                                else:
+                                    await self.check_billing()
+                            await asyncio.sleep(5)
+                    finally:
+                        await lease.execute(text('SELECT pg_advisory_unlock(74120302)'))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.exception('Infrastructure worker iteration failed')
+                await asyncio.sleep(15)
+
+    async def check_billing(self):
+        # Re-read panel deadlines so web-UI changes are authoritative.
+        import time
+        if time.monotonic() - self._last_billing_check < 60:
+            return
+        self._last_billing_check = time.monotonic()
+        async with self.factory() as session:
+            config = await read_config(session)
+            entries = {b['uuid']: b for b in (await self.api.billing()).get('billingNodes', [])}
+            providers = {p['uuid']: p['name'] for p in await self.api.providers()}
+            for node in await self.nodes(session):
+                entry = entries.get(node.billing_uuid)
+                if not entry:
+                    continue
+                deadline = datetime.fromisoformat(entry['nextBillingAt'].replace('Z', '+00:00'))
+                hours = (deadline - utcnow()).total_seconds() / 3600
+                eligible = [threshold for threshold in config['warning_hours'] if hours <= threshold]
+                for threshold in [min(eligible)] if eligible else []:
+                    for admin in self.settings.ADMIN_IDS:
+                        preference = await app_settings_dal.get_setting(session, f'infra.notify.{admin}')
+                        if preference and preference.value == 'false':
+                            continue
+                        marker = f'infra.warn.{node.id}.{threshold}.{admin}'
+                        sent = await app_settings_dal.get_setting(session, marker)
+                        if sent and sent.value == deadline.isoformat():
+                            continue
+                        message = (f'{html.escape(node.name)}: ' + ('дата оплаты прошла' if hours < 0 else f'до оплаты {max(0, int(hours))} ч') +
+                            f"\nПровайдер: {html.escape(providers.get(node.provider_uuid, '—'))}\n{deadline.strftime('%d.%m.%Y %H:%M UTC')}")
+                        try:
+                            from aiogram.utils.keyboard import InlineKeyboardBuilder
+                            kb = InlineKeyboardBuilder()
+                            kb.button(text='Открыть ноду', callback_data=f'infra:node:{node.id}')
+                            await self.bot.send_message(admin, message, reply_markup=kb.as_markup())
+                            await app_settings_dal.upsert_setting(session, marker, deadline.isoformat())
+                        except Exception:
+                            logging.warning('Cannot deliver billing reminder to %s', admin)
+                if hours <= 0 and config['expire_exclude_tg'] and not node.excluded_tg:
+                    if not config['tg_squad_uuid'] or not node.host_uuid:
+                        continue
+                    hosts = await self.panel.get_all_hosts()
+                    host = next((h for h in hosts or [] if h['uuid'] == node.host_uuid), None)
+                    if host:
+                        # Commit original state BEFORE panel mutation for restart recovery.
+                        if node.previous_host_access:
+                            saved = json.loads(node.previous_host_access)
+                        else:
+                            before, after = self.api.exclusion_values(host, config['tg_squad_uuid'], await self.panel.api_major())
+                            saved = {'before': before, 'after': after}
+                            node.previous_host_access = json.dumps(saved)
+                            await session.commit()
+                        await self.api.call('PATCH', '/hosts', dict(saved['after'], uuid=node.host_uuid))
+                        node.excluded_tg = True
+            await session.commit()

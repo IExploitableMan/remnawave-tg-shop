@@ -44,6 +44,8 @@ class PanelWebhookService:
             logging.error(f"Failed to send notification to {user_id}: {e}")
 
     async def handle_event(self, event_name: str, user_payload: dict):
+        if isinstance(user_payload, dict) and user_payload.get("id") is not None:
+            user_payload = await self.panel_service.normalize_user(user_payload)
         async with self.async_session_factory() as session:
             panel_uuid = None
             if isinstance(user_payload, dict):

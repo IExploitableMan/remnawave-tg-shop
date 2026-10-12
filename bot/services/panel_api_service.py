@@ -5,7 +5,8 @@ import re
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta, timezone
 import asyncio
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
+from bot.services.panel_identity_service import PanelIdentityService
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,13 +17,54 @@ from db.models import PanelSyncStatus
 
 class PanelApiService:
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, session_factory=None):
         self.settings = settings
         self.base_url = settings.PANEL_API_URL
         self.api_key = settings.PANEL_API_KEY
         self._session: Optional[aiohttp.ClientSession] = None
         self.default_client_ip = "127.0.0.1"
         self._profile_inbounds_cache: Dict[str, List[Dict[str, Any]]] = {}
+        self.identities = PanelIdentityService(self.base_url or '', session_factory)
+        self._api_major = None
+        self._version_lock = asyncio.Lock()
+
+    async def api_major(self):
+        if self._api_major is not None:
+            return self._api_major
+        async with self._version_lock:
+            if self._api_major is not None:
+                return self._api_major
+            configured = str(getattr(self.settings, "PANEL_API_VERSION", "auto"))
+            if configured in {"2", "3"}:
+                self._api_major = int(configured)
+                return self._api_major
+            if configured != "auto":
+                raise ValueError("PANEL_API_VERSION must be auto, 2 or 3")
+            result = await self._request("GET", "/system/metadata")
+            version = (result or {}).get("response", {}).get("version", "")
+            # Metadata can return a version object depending on panel build.
+            if isinstance(version, dict):
+                version = version.get("backend", "")
+            match = re.match(r"^v?([23])\.", str(version))
+            if not match:
+                raise RuntimeError("Cannot identify panel API version; no mutation was attempted")
+            self._api_major = int(match[1])
+            return self._api_major
+
+    async def _user_identifier(self, reference):
+        if await self.api_major() == 2:
+            return reference
+        return await self.identities.resolve(reference)
+
+    async def normalize_user(self, data):
+        return await self.identities.normalize(data)
+
+    async def initialize_identities(self):
+        await self.identities.load()
+        users = await self.get_all_panel_users()
+        if users is None:
+            raise RuntimeError("Panel identity synchronization failed")
+        return len(users)
 
     async def __aenter__(self):
         """Context manager entry"""
@@ -134,7 +176,7 @@ class PanelApiService:
                 should_log_full_body = bool(log_full_response and self.settings.LOG_LEVEL == "DEBUG")
                 if should_log_full_body or not (200 <= response_status < 300):
                     try:
-                        parsed_json_for_log = json.loads(response_text)
+                        parsed_json_for_log = self._sanitize_payload_for_log(json.loads(response_text))
                         pretty_response_text = json.dumps(parsed_json_for_log,
                                                           indent=2,
                                                           ensure_ascii=False)
@@ -143,14 +185,16 @@ class PanelApiService:
                         )
                     except json.JSONDecodeError:
                         logging.info(
-                            f"{log_prefix} {log_suffix} | Full Response Text (not JSON):\n{response_text[:2000]}{'...' if len(response_text) > 2000 else ''}"
+                            f"{log_prefix} {log_suffix} | Non-JSON response body omitted"
                         )
                 else:
                     logging.debug(
-                        f"{log_prefix} {log_suffix} | OK. Response Body Preview: {response_text[:200]}{'...' if len(response_text) > 200 else ''}"
+                        f"{log_prefix} {log_suffix} | OK"
                     )
 
                 if 200 <= response_status < 300:
+                    if not response_text.strip():
+                        return {"status": "success", "code": response_status}
                     try:
                         if 'application/json' in response.headers.get(
                                 'Content-Type', '').lower():
@@ -244,7 +288,7 @@ class PanelApiService:
                 return None
             users_batch = response_data.get("response", {}).get("users", [])
             if not users_batch: break
-            all_users.extend(users_batch)
+            all_users.extend([await self.normalize_user(user) for user in users_batch])
             if len(users_batch) < page_size: break
             start_offset += page_size
             await asyncio.sleep(0.1)
@@ -255,13 +299,13 @@ class PanelApiService:
             self,
             user_uuid: str,
             log_response: bool = True) -> Optional[Dict[str, Any]]:
-        endpoint = f"/users/{user_uuid}"
+        endpoint = f"/users/{await self._user_identifier(user_uuid)}"
         full_response = await self._request("GET",
                                             endpoint,
                                             log_full_response=log_response)
         if full_response and not full_response.get(
                 "error") and "response" in full_response:
-            return full_response.get("response")
+            return await self.normalize_user(full_response.get("response"))
 
         return None
 
@@ -294,66 +338,45 @@ class PanelApiService:
             email: Optional[str] = None,
             log_response: bool = True) -> Optional[List[Dict[str, Any]]]:
 
-        response_data = None
-        filter_used_log = "No filter specified"
-
-        if telegram_id is not None:
-            filter_used_log = f"telegramId={telegram_id}"
-            endpoint = f"/users/by-telegram-id/{telegram_id}"
-            response_data = await self._request("GET",
-                                                endpoint,
-                                                log_full_response=log_response)
-
-            if response_data and not response_data.get(
-                    "error") and "response" in response_data and isinstance(
-                        response_data["response"], list):
-                return response_data["response"]
-            elif response_data and response_data.get("errorCode") == "A062":
-                logging.info(
-                    f"Panel API: Users not found for {filter_used_log}")
-                return []
-
-        elif username is not None:
-            filter_used_log = f"username={username}"
-            endpoint = f"/users/by-username/{username}"
-            response_data = await self._request("GET",
-                                                endpoint,
-                                                log_full_response=log_response)
-
-            if response_data and not response_data.get(
-                    "error") and "response" in response_data and isinstance(
-                        response_data["response"], dict):
-                return [response_data["response"]]
-            elif response_data and response_data.get("errorCode") == "A062":
-                logging.info(
-                    f"Panel API: User not found for {filter_used_log}")
-                return []
-
-        elif email is not None:
-            filter_used_log = f"email={email}"
-            endpoint = f"/users/by-email/{email}"
-            response_data = await self._request("GET",
-                                                endpoint,
-                                                log_full_response=log_response)
-
-            if response_data and not response_data.get(
-                    "error") and "response" in response_data and isinstance(
-                        response_data["response"], list):
-                return response_data["response"]
-            elif response_data and response_data.get("errorCode") == "A062":
-                logging.info(
-                    f"Panel API: Users not found for {filter_used_log}")
-                return []
-
-        if not telegram_id and not username and not email:
-            logging.warning(
-                "get_users_by_filter called without any specific filter criteria."
-            )
+        if telegram_id is None and username is None and email is None:
             return []
-
-        logging.error(
-            f"Failed to fetch panel users with filter ({filter_used_log}). Last API response: {response_data if not log_response else '(logged above)'}"
-        )
+        major = await self.api_major()
+        if username is not None:
+            result = await self._request("GET", f"/users/by-username/{quote(username, safe='')}",
+                                         log_full_response=log_response)
+            raw = (result or {}).get("response")
+            if isinstance(raw, dict):
+                return [await self.normalize_user(raw)]
+        elif major == 2:
+            endpoint = (f"/users/by-telegram-id/{telegram_id}" if telegram_id is not None
+                        else f"/users/by-email/{quote(email, safe='')}")
+            result = await self._request("GET", endpoint, log_full_response=log_response)
+            raw = (result or {}).get("response")
+            if isinstance(raw, list):
+                return [await self.normalize_user(user) for user in raw]
+        else:
+            field, value = ("telegramId", telegram_id) if telegram_id is not None else ("email", email)
+            found = []
+            start = 0
+            while True:
+                result = await self._request("GET", "/users", params={
+                    "start": start, "size": 100,
+                    "filters": json.dumps([{"id": field, "value": value}]),
+                    "filterModes": json.dumps({field: "equals"}),
+                }, log_full_response=log_response)
+                if not result or result.get("error"):
+                    break
+                users = result.get("response", {}).get("users", [])
+                # Fail closed if a proxy/panel ignores filters.
+                found.extend([await self.normalize_user(user) for user in users if
+                    str(user.get(field)) == str(value)])
+                if len(users) < 100:
+                    return found
+                start += 100
+        if result and result.get("error"):
+            details = result.get("details") or {}
+            if result.get("status_code") == 404 or details.get("errorCode") in {"A062", "A040"}:
+                return []
         return None
 
     async def create_panel_user(
@@ -419,11 +442,13 @@ class PanelApiService:
         if description: payload["description"] = description
         if tag: payload["tag"] = tag
 
+        await self.api_major()
         response = await self._request("POST",
                                        "/users",
                                        json=payload,
                                        log_full_response=log_response)
         if response and not response.get("error") and "response" in response:
+            response["response"] = await self.normalize_user(response["response"])
             logging.info(
                 f"Panel user '{username_on_panel}' created successfully (UUID: {response.get('response',{}).get('uuid')})."
             )
@@ -442,8 +467,14 @@ class PanelApiService:
             user_uuid: str,
             update_payload: Dict[str, Any],
             log_response: bool = True) -> Optional[Dict[str, Any]]:
-        if 'uuid' not in update_payload:
-            update_payload['uuid'] = user_uuid
+        update_payload = dict(update_payload)
+        identifier = await self._user_identifier(user_uuid)
+        if await self.api_major() == 3:
+            update_payload.pop("uuid", None)
+            update_payload["id"] = identifier
+        else:
+            update_payload.pop("id", None)
+            update_payload["uuid"] = identifier
 
         full_response = await self._request("PATCH",
                                             "/users",
@@ -452,7 +483,7 @@ class PanelApiService:
         if full_response and not full_response.get(
                 "error") and "response" in full_response:
             logging.info(f"User {user_uuid} details updated on panel.")
-            return full_response.get("response")
+            return await self.normalize_user(full_response.get("response"))
 
         logging.error(
             "Failed to update user %s details on panel. Payload: %s, Response: %s",
@@ -467,7 +498,7 @@ class PanelApiService:
                                           enable: bool,
                                           log_response: bool = True) -> bool:
         action = "enable" if enable else "disable"
-        endpoint = f"/users/{user_uuid}/actions/{action}"
+        endpoint = f"/users/{await self._user_identifier(user_uuid)}/actions/{action}"
         response_data = await self._request("POST",
                                             endpoint,
                                             log_full_response=log_response)
@@ -496,7 +527,7 @@ class PanelApiService:
             self,
             user_uuid: str,
             log_response: bool = True) -> bool:
-        endpoint = f"/users/{user_uuid}/actions/reset-traffic"
+        endpoint = f"/users/{await self._user_identifier(user_uuid)}/actions/reset-traffic"
         response_data = await self._request(
             "POST",
             endpoint,
@@ -516,7 +547,7 @@ class PanelApiService:
                                      user_uuid: str,
                                      log_response: bool = True) -> bool:
         """Delete a user from the panel. Treat not-found as already deleted."""
-        endpoint = f"/users/{user_uuid}"
+        endpoint = f"/users/{await self._user_identifier(user_uuid)}"
         response_data = await self._request(
             "DELETE", endpoint, log_full_response=log_response
         )
@@ -530,7 +561,7 @@ class PanelApiService:
         if response_data.get("error"):
             details = response_data.get("details") or {}
             error_code = details.get("errorCode") or response_data.get("errorCode")
-            if error_code in {"A062", "A040"}:
+            if response_data.get("status_code") == 404 or error_code in {"A062", "A040"}:
                 logging.info(
                     f"Panel user {user_uuid} already absent (errorCode {error_code}). Treating as deleted."
                 )
@@ -557,7 +588,7 @@ class PanelApiService:
         return base_sub_url
 
     async def get_user_devices(self, user_uuid: str) -> Optional[List[Dict[str, Any]]]:
-        endpoint = f"/hwid/devices/{user_uuid}"
+        endpoint = f"/hwid/devices/{await self._user_identifier(user_uuid)}"
         response_data = await self._request("GET", endpoint, log_full_response=False)
         if response_data and not response_data.get("error") and "response" in response_data:
             return response_data.get("response")
@@ -569,11 +600,11 @@ class PanelApiService:
     async def disconnect_device(self, user_uuid: str, hwid: str) -> bool:
         endpoint = f"/hwid/devices/delete"
         payload = {
-            "userUuid": user_uuid,
+            "userId" if await self.api_major() == 3 else "userUuid": await self._user_identifier(user_uuid),
             "hwid": hwid
         }
         response_data = await self._request("POST", endpoint, json=payload, log_full_response=False)
-        if response_data and not response_data.get("error") and "response" in response_data:
+        if response_data and not response_data.get("error"):
             return True
         logging.error(
             f"Failed to disconnect device {hwid} for user {user_uuid}. Payload: {payload}, Response: {response_data}"
@@ -619,7 +650,7 @@ class PanelApiService:
         """Get nodes available to a specific panel user."""
         response_data = await self._request(
             "GET",
-            f"/users/{user_uuid}/accessible-nodes",
+            f"/users/{await self._user_identifier(user_uuid)}/accessible-nodes",
             log_full_response=False,
         )
         if response_data and not response_data.get("error") and "response" in response_data:
@@ -649,12 +680,12 @@ class PanelApiService:
             return hosts if isinstance(hosts, list) else []
         return None
 
-    async def get_inbounds_by_profile_uuid(self, profile_uuid: str) -> Optional[List[Dict[str, Any]]]:
+    async def get_inbounds_by_profile_uuid(self, profile_uuid: str, refresh: bool = False) -> Optional[List[Dict[str, Any]]]:
         """Get inbounds for config profile and cache result for current service lifetime."""
         profile_uuid = str(profile_uuid or "").strip()
         if not profile_uuid:
             return []
-        if profile_uuid in self._profile_inbounds_cache:
+        if not refresh and profile_uuid in self._profile_inbounds_cache:
             return self._profile_inbounds_cache[profile_uuid]
 
         response_data = await self._request(
@@ -675,6 +706,10 @@ class PanelApiService:
 
         Returns the encrypted link string or None if encryption failed.
         """
+        if await self.api_major() == 3:
+            # Removed by Remnawave v3. Return None so callers use their existing
+            # plain-link fallback instead of a guaranteed 404.
+            return None
         payload = {"linkToEncrypt": link_to_encrypt}
         response_data = await self._request(
             "POST",

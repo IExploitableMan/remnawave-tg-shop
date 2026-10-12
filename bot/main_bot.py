@@ -54,6 +54,20 @@ async def on_startup_configured(dispatcher: Dispatcher):
     async_session_factory: sessionmaker = dispatcher["async_session_factory"]
 
     logging.info("STARTUP: on_startup_configured executing...")
+    try:
+        count = await panel_service.initialize_identities()
+        from sqlalchemy import update
+        from db.models import User, Subscription
+        async with async_session_factory() as identity_session:
+            for reference, identifier in panel_service.identities.by_reference.items():
+                await identity_session.execute(update(User).where(User.panel_user_uuid == reference).values(panel_user_id=identifier))
+                await identity_session.execute(update(User).where(User.addon_panel_user_uuid == reference).values(addon_panel_user_id=identifier))
+                await identity_session.execute(update(Subscription).where(Subscription.panel_user_uuid == reference).values(panel_user_id=identifier))
+            await identity_session.commit()
+        logging.info("Panel identity synchronization: %s users", count)
+    except Exception:
+        logging.exception("Panel unavailable or identity synchronization failed; existing links retained")
+
 
 
     telegram_webhook_url_to_set = settings.WEBHOOK_BASE_URL
@@ -148,6 +162,13 @@ async def on_startup_configured(dispatcher: Dispatcher):
         except Exception as e:
             logging.error(f"STARTUP: Failed to set bot commands: {e}", exc_info=True)
 
+    if settings.INFRA_ENABLED:
+        try:
+            await dispatcher["infrastructure_service"].start()
+        except Exception:
+            logging.exception("Infrastructure worker configuration failed")
+            raise
+
     # Initialize message queue manager
     try:
         queue_manager = init_queue_manager(bot)
@@ -228,6 +249,7 @@ async def on_shutdown_configured(dispatcher: Dispatcher):
                     logging.warning(f"Failed to close session for {key}: {e}")
 
     for service_key in (
+        "infrastructure_service",
         "panel_service",
         "cryptopay_service",
         "freekassa_service",

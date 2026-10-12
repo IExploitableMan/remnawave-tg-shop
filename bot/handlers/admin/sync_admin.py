@@ -168,6 +168,8 @@ async def perform_sync(
                 actual_user_id = existing_user.user_id
 
                 # Update panel UUID if different
+                if panel_user_dict.get("id") is not None:
+                    existing_user.panel_user_id = int(panel_user_dict["id"])
                 if existing_user.panel_user_uuid != panel_uuid:
                     existing_user.panel_user_uuid = panel_uuid
                     user_was_updated = True

@@ -389,6 +389,9 @@ class SubscriptionService:
                 await self._notify_admin_panel_user_creation_failed(user_id, kind=kind)
                 return None, None, None, False
 
+        numeric_attr = "addon_panel_user_id" if kind == SUBSCRIPTION_KIND_ADDON else "panel_user_id"
+        if panel_user_obj_from_api.get("id") is not None:
+            setattr(db_user, numeric_attr, int(panel_user_obj_from_api["id"]))
         actual_panel_uuid = panel_user_obj_from_api.get("uuid")
         if not actual_panel_uuid:
             logging.error("Panel user for user %s kind %s has no uuid: %s", user_id, kind, panel_user_obj_from_api)

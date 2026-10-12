@@ -1,0 +1,18 @@
+---
+- name: Synchronize administrator public keys
+  hosts: node
+  gather_facts: false
+  tasks:
+    - name: Create root SSH directory
+      ansible.builtin.file:
+        path: /root/.ssh
+        state: directory
+        mode: '0700'
+    - name: Install public keys preserving unmanaged entries
+      ansible.builtin.lineinfile:
+        path: /root/.ssh/authorized_keys
+        line: '{{ item }}'
+        create: true
+        mode: '0600'
+      loop: '{{ ssh_public_keys }}'
+      no_log: true

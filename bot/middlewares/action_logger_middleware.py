@@ -20,6 +20,11 @@ class ActionLoggerMiddleware(BaseMiddleware):
                                                Awaitable[Any]], event: Update,
                        data: Dict[str, Any]) -> Any:
 
+        # Inspect state BEFORE handler: it may clear/advance the FSM. Never
+        # serialize infrastructure forms (including invalid passwords) to logs.
+        state = data.get("state")
+        state_name = await state.get_state() if state else None
+        sensitive = bool(state_name and state_name.startswith("InfrastructureStates:"))
         result = await handler(event, data)
 
         session: AsyncSession = data["session"]
@@ -40,7 +45,7 @@ class ActionLoggerMiddleware(BaseMiddleware):
                 is_admin_event_flag = True
 
         raw_update_snippet = None
-        if self.settings.LOG_STORE_RAW_UPDATES:
+        if self.settings.LOG_STORE_RAW_UPDATES and not sensitive:
             try:
                 raw_update_snippet = event.model_dump_json(exclude_none=True,
                                                            indent=None)[:1000]
@@ -66,6 +71,9 @@ class ActionLoggerMiddleware(BaseMiddleware):
             content = cb.data
             current_event_type = f"callback:{cb.data}" if cb.data else "callback"
 
+        if sensitive:
+            content = "[infrastructure input redacted]"
+            current_event_type = "message:infrastructure"
         if user_id or current_event_type not in ["update"]:
 
             log_user_id_for_db = user_id

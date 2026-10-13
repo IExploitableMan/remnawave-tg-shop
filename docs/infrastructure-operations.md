@@ -148,3 +148,18 @@ Do not apply production migrations or install remote servers as part of local te
 - The updated test bot runs on the replacement panel server with the restored bot
   database, automation key and report history. Telegram polling is confirmed;
   the previous test poller is stopped with automatic restart disabled.
+- Additional real-server checks passed without repeating quality benchmarks:
+  an injected health-check failure after switching the host rolled the panel node
+  and host back and preserved the original active deployment/credentials. A second
+  real Debian node used `node76 (FI)` after a manually created panel `node75`, kept
+  its individual 15-day period, and received its automatic host and billing entry.
+  A new global key authenticated root access to both managed nodes. Deleting the
+  temporary node removed its panel/host/billing objects without touching the first.
+- Actual OS reboots on the Ubuntu node and replacement panel server preserved
+  Docker startup, root password/key access, UFW and BBR/FQ. Panel, PostgreSQL, Redis
+  and bot recovered automatically. A new authenticated external VPN session passed
+  after both reboots; the management port remained blocked outside the panel.
+- A manually installed SSH key outside the bot's key list remained usable after
+  synchronization; the temporary key was removed and the original authorized keys
+  were restored. The current administrator UI supports adding/synchronizing keys,
+  not deleting them.

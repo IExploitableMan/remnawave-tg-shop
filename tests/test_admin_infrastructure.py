@@ -172,3 +172,60 @@ class InfrastructureHandlerTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue((root/'report.pdf').exists())
             self.assertEqual(self.service.bot.send_document.await_args.args[1].path, root/'report.pdf')
             self.assertEqual(self.message.answer.await_args.kwargs['reply_markup'].inline_keyboard[-1][0].callback_data, 'infra:reports:1')
+
+    async def test_installation_profile_choice_keeps_inputs_and_does_not_change_defaults(self):
+        await self.wizard(phase='profile', profile_step=True, profile_uuid='default', inbound_uuid='old')
+        self.service.api.profiles = AsyncMock(return_value=[{'uuid': 'default', 'name': 'Default profile'},
+            {'uuid': 'other', 'name': 'Another profile'}])
+        self.service.panel = SimpleNamespace(get_inbounds_by_profile_uuid=AsyncMock(return_value=[
+            {'uuid': 'new', 'type': 'vless', 'port': 443, 'tag': 'vless443'}]))
+        with patch('bot.handlers.admin.infrastructure.save_config', new=AsyncMock()) as save:
+            await self.click('infra:wizard_profile:other')
+        data = await self.state.get_data()
+        self.assertEqual(data['profile_uuid'], 'other')
+        self.assertEqual(data['inbound_uuid'], 'new')
+        self.assertEqual(data['profile_name'], 'Another profile')
+        self.assertEqual(data['address'], '203.0.113.1')
+        self.assertEqual(data['phase'], 'providers')
+        save.assert_not_awaited()
+
+    async def test_profile_requires_explicit_inbound_when_ambiguous(self):
+        await self.wizard(phase='profile_list', profile_step=True, profile_uuid='default', inbound_uuid='old')
+        self.service.api.profiles = AsyncMock(return_value=[{'uuid': 'other', 'name': 'Another profile'}])
+        self.service.panel = SimpleNamespace(get_inbounds_by_profile_uuid=AsyncMock(return_value=[
+            {'uuid': key, 'type': 'vless', 'port': 443, 'tag': key} for key in ('one', 'two')]))
+        await self.click('infra:wizard_profile:other')
+        self.assertEqual((await self.state.get_data())['phase'], 'profile_inbounds')
+        await self.click('infra:wizard_inbound:two')
+        self.assertEqual((await self.state.get_data())['inbound_uuid'], 'two')
+        self.assertEqual((await self.state.get_data())['phase'], 'providers')
+
+    async def test_upgrade_screen_does_not_enqueue_and_hides_button_when_current(self):
+        self.service.node = AsyncMock(return_value=SimpleNamespace(id=1, panel_uuid='node', name='node1 (DE)'))
+        self.service.refresh_node = AsyncMock()
+        self.service.deployment = AsyncMock(return_value=SimpleNamespace(node_version='outdated-local-value'))
+        self.service.api.nodes = AsyncMock(return_value=[{'uuid': 'node', 'versions': {'node': '3.4.2'}}])
+        self.service.panel = SimpleNamespace(api_major=AsyncMock(return_value=3))
+        self.service.enqueue = AsyncMock()
+        with patch('bot.handlers.admin.infrastructure.read_config', new=AsyncMock(return_value={'node_version_3': '3.4.2'})), \
+             patch('bot.handlers.admin.infrastructure.latest_node_version', new=AsyncMock(return_value='3.4.2')):
+            await self.click('infra:upgrade:1')
+        self.service.enqueue.assert_not_awaited()
+        text = self.message.edit_text.await_args.args[0]
+        self.assertIn('Up to date', text)
+        self.assertNotIn('outdated-local-value', text)
+        markup = self.message.edit_text.await_args.kwargs['reply_markup']
+        self.assertFalse(any(b.callback_data.startswith('infra:upgrade_confirm:') for row in markup.inline_keyboard for b in row))
+
+    async def test_changed_upgrade_target_is_rejected_before_enqueue(self):
+        self.service.node = AsyncMock(return_value=SimpleNamespace(id=1, panel_uuid='node', name='node1 (DE)'))
+        self.service.refresh_node = AsyncMock()
+        self.service.deployment = AsyncMock(return_value=SimpleNamespace())
+        self.service.api.nodes = AsyncMock(return_value=[{'uuid': 'node', 'versions': {'node': '3.4.0'}}])
+        self.service.panel = SimpleNamespace(api_major=AsyncMock(return_value=3))
+        self.service.enqueue = AsyncMock()
+        with patch('bot.handlers.admin.infrastructure.read_config', new=AsyncMock(return_value={'node_version_3': '3.4.2'})), \
+             patch('bot.handlers.admin.infrastructure.latest_node_version', new=AsyncMock(return_value='3.4.3')):
+            await self.click('infra:upgrade_confirm:1:3.4.2')
+        self.service.enqueue.assert_not_awaited()
+        self.assertIn('target changed', self.message.answer.await_args.args[0])

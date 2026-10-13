@@ -174,12 +174,16 @@ class InfrastructureDatabaseTests(unittest.IsolatedAsyncioTestCase):
         node, deployment = await self.node_fixture()
         self.service.panel.api_major = AsyncMock(return_value=3)
         self.service.api.node_secret = AsyncMock(return_value='test-secret')
+        self.service.validate_deployment = AsyncMock()
+        self.service.api.nodes = AsyncMock(return_value=[{'uuid': node.panel_uuid, 'versions': {'node': '2.8.0'}}])
         async with self.factory() as session:
             (await session.get(Deployment, deployment.id)).node_version = '2.8.0'
             job = await self.service.enqueue(session, node, deployment, 'upgrade', 111)
             await session.commit()
-        with patch('bot.services.infrastructure.provisioning.ansible', new=AsyncMock(side_effect=RuntimeError('Installation failed'))):
+        with patch('bot.services.infrastructure.provisioning.ansible', new=AsyncMock(side_effect=RuntimeError('Installation failed'))) as install, \
+             patch('bot.services.infrastructure.versions.latest_node_version', new=AsyncMock(return_value='3.4.2')):
             await run_job(self.service, job.id)
+        install.assert_awaited_once()
         async with self.factory() as session:
             self.assertEqual((await session.get(Deployment, deployment.id)).node_version, '2.8.0')
             self.assertEqual((await session.get(Job, job.id)).status, 'failed')
@@ -288,3 +292,81 @@ class InfrastructureDatabaseTests(unittest.IsolatedAsyncioTestCase):
             await self.service.check_billing()
         self.service.api.call.assert_not_awaited()
         self.service.panel.get_all_hosts.assert_not_awaited()
+
+    async def test_operation_progress_survives_restart_and_completion_is_separate(self):
+        from bot.services.infrastructure.job_messages import publish_job
+        node, deployment = await self.node_fixture()
+        self.settings.DEFAULT_LANGUAGE = 'en'
+        self.bot.send_message.side_effect = [SimpleNamespace(message_id=501), SimpleNamespace(message_id=502)]
+        async with self.factory() as session:
+            job = await self.service.enqueue(session, node, deployment, 'restart', 111)
+            await session.commit()
+        await publish_job(self.service, job.id)
+        await publish_job(self.service, job.id)
+        self.assertEqual(self.bot.send_message.await_count, 1)
+        async with self.factory() as session:
+            row = await session.get(Job, job.id)
+            self.assertEqual(row.progress_message_id, 501)
+            row.status, row.started_at = 'running', datetime.now(timezone.utc)
+            await session.commit()
+        restarted = InfrastructureService(self.settings, self.service.panel, self.bot, self.factory)
+        await publish_job(restarted, job.id)
+        self.assertEqual(self.bot.edit_message_text.await_args.kwargs['message_id'], 501)
+        async with self.factory() as session:
+            row = await session.get(Job, job.id)
+            row.status, row.finished_at = 'done', datetime.now(timezone.utc)
+            await session.commit()
+        await publish_job(restarted, job.id, complete=True)
+        await publish_job(restarted, job.id, complete=True)
+        self.assertEqual(self.bot.send_message.await_count, 2)
+        text = self.bot.send_message.await_args.args[1]
+        self.assertIn(node.name, text)
+        self.assertIn('Restart', text)
+        self.assertNotIn('#', text)
+        self.assertNotIn('queued', text)
+        async with self.factory() as session:
+            self.assertEqual((await session.get(Job, job.id)).completion_message_id, 502)
+
+    async def test_queue_handler_excludes_finished_jobs_and_numbers_waiting_jobs(self):
+        from bot.handlers.admin.infrastructure import infrastructure_callback
+        from bot.middlewares.i18n import JsonI18n
+        node, deployment = await self.node_fixture()
+        async with self.factory() as session:
+            session.add_all([Job(node_id=node.id, deployment_id=deployment.id, requested_by=111,
+                kind='restart', status=status) for status in ('done', 'running', 'pending', 'pending')])
+            await session.commit()
+        self.settings.INFRA_ENABLED = True
+        message = SimpleNamespace(chat=SimpleNamespace(type='private'), edit_text=AsyncMock(), answer=AsyncMock())
+        callback = SimpleNamespace(data='infra:jobs', from_user=SimpleNamespace(id=111), message=message, answer=AsyncMock())
+        state = SimpleNamespace(get_data=AsyncMock(return_value={}), update_data=AsyncMock(), clear=AsyncMock())
+        async with self.factory() as session:
+            await infrastructure_callback(callback, state, session, self.service, self.settings,
+                {'current_language': 'en', 'i18n_instance': JsonI18n('locales', default='en')})
+        rows = message.edit_text.await_args.kwargs['reply_markup'].inline_keyboard
+        labels = [row[0].text for row in rows if row[0].callback_data.startswith('infra:job:')]
+        self.assertEqual(len(labels), 3)
+        self.assertTrue(labels[0].startswith('▶️'))
+        self.assertTrue(labels[1].startswith('1.'))
+        self.assertTrue(labels[2].startswith('2.'))
+
+    async def test_prepare_uses_selected_install_profile_without_mutating_defaults(self):
+        from unittest.mock import patch
+        profile, inbound, provider = str(uuid4()), str(uuid4()), str(uuid4())
+        defaults = {'profile_uuid': str(uuid4()), 'inbound_uuid': str(uuid4()), 'panel_ip': '203.0.113.10',
+                    'sni_ru': [], 'sni_other': [], 'node_version_3': '3.4.2'}
+        self.service.api.providers = AsyncMock(return_value=[{'uuid': provider}])
+        self.service.api.nodes = AsyncMock(return_value=[])
+        self.service.panel.api_major = AsyncMock(return_value=3)
+        self.service.panel.get_inbounds_by_profile_uuid = AsyncMock(return_value=[{'uuid': inbound, 'port': 443, 'type': 'vless'}])
+        values = {'address': '203.0.113.77', 'country': 'DE', 'provider_uuid': provider, 'period_days': 15,
+                  'password': 'secret', 'host_public_key': 'test key', 'profile_uuid': profile, 'inbound_uuid': inbound}
+        with patch('bot.services.infrastructure.service.read_config', new=AsyncMock(return_value=defaults)):
+            async with self.factory() as session:
+                node, job = await self.service.prepare(session, values, 111)
+                await session.commit()
+        async with self.factory() as session:
+            saved = await session.get(Deployment, job.deployment_id)
+            self.assertEqual(saved.profile_uuid, profile)
+            self.assertEqual(saved.inbound_uuid, inbound)
+        self.assertNotEqual(defaults['profile_uuid'], profile)
+        self.service.panel.get_inbounds_by_profile_uuid.assert_awaited_with(profile, refresh=True)

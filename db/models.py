@@ -482,6 +482,10 @@ class InfrastructureJob(Base):
     requested_by = Column(BigInteger, nullable=False)
     result = Column(Text, nullable=True)  # no credentials or remote raw shell errors
     cancel_requested = Column(Boolean, nullable=False, default=False)
+    progress_message_id = Column(BigInteger, nullable=True)
+    completion_message_id = Column(BigInteger, nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    target_version = Column(String(32), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     finished_at = Column(DateTime(timezone=True), nullable=True)
 

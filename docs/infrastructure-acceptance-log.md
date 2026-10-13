@@ -177,3 +177,31 @@ Reusable helpers and private raw output are retained under `/tmp/infra-acceptanc
 - `stand-final-state.log`: final cleanup and running-service/node inventory.
 
 Credentials, API tokens and private SSH keys are excluded from this committed log.
+
+## Queue/profile/upgrade follow-up, 2026-10-13, approximately 20:45 Moscow
+
+Only the authorized test bot on 154.86.119.144 was updated after confirming an
+empty queue. Code hashes, migration `0016_infrastructure_job_messages`, polling
+and the running-only DB constraint were checked. Production was untouched.
+
+| Check | Execution and observed result | Status |
+| --- | --- | --- |
+| Local regressions | 137 Python 3.12 tests, actual PostgreSQL migrations, persistent operation messages, waiting order, profile selection/inbound ambiguity and upgrade confirmation guards; 13 handler checks repeated after navigation polish | PASS |
+| Installed/latest node version | Real panel and GitHub reported 3.4.2; actual upgrade handler rendered Up to date with no upgrade action | PASS |
+| Wizard profile | Real configured profile name shown without UUID; default selection resolved its VLESS/443 inbound and advanced to providers, without Ansible or a panel mutation | PASS |
+| Add node placement | Actual Nodes handler contained Add node; main infrastructure menu no longer contains it | PASS |
+| Live operational queue | Two small checks, audit IDs 30 and 31, ran on 104.252.89.173 with first finished_at <= second started_at | PASS |
+| Telegram operation lifecycle | Both checks persisted distinct editable progress and separate completion message IDs, plus report history records | PASS |
+| Completed queue entries | Actual queue handler excluded both completed checks | PASS |
+
+These were lightweight container/listener/panel/TCP checks, not server quality
+benchmarks. No speed/CPU/IP-quality suite was rerun. No physical VPS replacement
+or OS reinstallation occurred in this follow-up. Historical API/provisioning
+acceptance above remains separately attributed.
+
+Evidence and reusable helpers: `/tmp/infra-queue-followup/`. Node 104 remains
+active, 154 hosts the test panel/bot, 95.182.88.203 remains released for the owner's
+manual test (old node container stopped, not a clean OS), and 95.182.88.225 remains
+an unused old stand with its containers preserved. WARP/Psiphon is deferred.
+
+Final checkpoint-count polish: 56 focused infrastructure tests passed, including legacy extra-result handling. The diagnostic catalog is version 3. This changes rendering/progress bookkeeping only; no remote benchmark was run.

@@ -1,6 +1,6 @@
 # Infrastructure management planning notes
 
-This document records agreed requirements. Implementation is in progress on a branch based on main; server acceptance checks are pending.
+This document records agreed requirements. Implementation and dedicated server acceptance are recorded in infrastructure-acceptance-log.md; the branch is based on main. Production deployment remains separate.
 
 ## Compatibility
 
@@ -49,7 +49,7 @@ This document records agreed requirements. Implementation is in progress on a br
 
 - Small: automatic operational checks after provisioning/replacement and configuration changes; no heavy benchmarks.
 - Medium: manual full ServerGrade-equivalent suite in one pass, including region/services, censorship/DPI, Russian and international network tests, YABS, bench.sh, IP Check Place/IP quality and CPU checks; image reports organized by test as in the supplied examples.
-- Large: manual expanded multitest-bot-equivalent suite, with repeated measurements and longer stability checks; PDF including per-run results and aggregate statistics for repeatable numeric measurements. Repetition count is configurable, initially proposed as three.
+- Large: manual expanded multitest-bot-equivalent suite, with repeated measurements and longer stability checks; PDF including per-run results and aggregate statistics for repeatable numeric measurements. Repetition count is configurable and defaults to one; IP/region/availability facts are captured once per job.
 - Reuse medium results in the large report where applicable; do not redundantly launch equivalent heavy tests without a measurement purpose.
 - Store structured measurements, raw output, report artifacts and test version against a deployment, including its historical IP.
 - Never publish test reports to competing third-party reporting or image-upload services. The owner explicitly permits Geekbench and Ookla's normal measurement/result handling. Send requested artifacts directly through Telegram.
@@ -64,3 +64,16 @@ This document records agreed requirements. Implementation is in progress on a br
 
 - Monitor CPU steal over time.
 - Monitor network throughput over time; distinguish passive interface traffic from active speed measurements.
+
+## Agreed operation UI, profile and upgrade changes
+
+- Show only active operations in the queue; use relative waiting positions.
+- Send persistent editable progress and a separate completion message with
+  attachments and contextual actions; keep operation history on each node card.
+- Add node belongs in Nodes. Select the installation profile by name, initially
+  from settings, without changing the global default.
+- Upgrade first displays the reported current version and available stable
+  release, then requires confirmation. Hide the action when already current.
+- SSH access capture belongs to an existing node and enables its management; it
+  does not create or install a new node.
+- WARP/Psiphon egress is deferred; no installation/routing changes were made.

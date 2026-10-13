@@ -101,9 +101,16 @@ class InfrastructureService:
     async def prepare(self, session, values, admin_id, replace_id=None):
         # The DB lock serializes allocation across bot instances as well as FSMs.
         await session.execute(text('SELECT pg_advisory_xact_lock(74120301)'))
-        config = await read_config(session)
+        config = dict(await read_config(session))
+        for key in ('profile_uuid', 'inbound_uuid'):
+            if values.get(key):
+                config[key] = values[key]
         if not config['profile_uuid'] or not config['inbound_uuid'] or not config['panel_ip']:
             raise ValueError('Сначала выберите профиль/inbound и IP панели в настройках инфраструктуры')
+        inbounds = await self.panel.get_inbounds_by_profile_uuid(config['profile_uuid'], refresh=True)
+        if not any(i['uuid'] == config['inbound_uuid'] and str(i.get('port')) == '443'
+                   and i.get('type', '').lower() == 'vless' for i in inbounds or []):
+            raise ValueError('Выбранный inbound должен быть VLESS на порту 443')
         validate_address(values['address'])
         if not 1 <= int(values['period_days']) <= 3650:
             raise ValueError('Срок: от 1 до 3650 дней')
@@ -123,10 +130,6 @@ class InfrastructureService:
         all_panel = await self.api.nodes()
         if replace_id:
             node = await self.node(session, replace_id)
-            await session.execute(select(Node.id).where(Node.id == node.id).with_for_update())
-            if (await session.execute(select(Job.id).where(Job.node_id == node.id,
-                    Job.status.in_(['pending', 'running'])))).first():
-                raise ValueError('Дождитесь завершения заданий перед заменой VPS')
             await session.execute(select(Node.id).where(Node.id == node.id).with_for_update())
             if (await session.execute(select(Job.id).where(Job.node_id == node.id,
                     Job.status.in_(['pending', 'running'])))).first():
@@ -441,6 +444,7 @@ class InfrastructureService:
     async def worker(self):
         # Session-level advisory lock elects one worker for all bot instances.
         from .provisioning import run_job
+        from .job_messages import publish_job, refresh_queue_messages
         while True:
             try:
                 async with self.factory() as lease:
@@ -449,6 +453,7 @@ class InfrastructureService:
                         await asyncio.sleep(10); continue
                     try:
                         while True:
+                            await refresh_queue_messages(self)
                             # Preserve queued jobs while the panel starts or is unavailable.
                             await self.api.call('GET', '/system/metadata')
                             await self.enqueue_pending_keys()
@@ -458,21 +463,29 @@ class InfrastructureService:
                                 if job:
                                     if job.status == 'running':
                                         job.status, job.result = 'interrupted', 'Задание прервано перезапуском. Можно повторить.'
+                                        job.finished_at = utcnow()
                                         await session.commit()
+                                        await publish_job(self, job.id, complete=True)
                                     else:
                                         job.status = 'running'
+                                        job.started_at = utcnow()
                                         await session.commit()
+                                        await publish_job(self, job.id)
                                         self.current = asyncio.create_task(run_job(self, job.id))
                                         try:
+                                            message_tick = 0
                                             while not self.current.done():
                                                 await asyncio.sleep(2)
+                                                message_tick += 1
+                                                if message_tick % 3 == 0:
+                                                    await refresh_queue_messages(self)
                                                 try:
                                                     await self.check_billing()
                                                 except Exception:
                                                     logging.exception('Infrastructure billing check failed')
                                                 async with self.factory() as cancel_session:
                                                     row = await cancel_session.get(Job, job.id)
-                                                    if row.cancel_requested:
+                                                    if row.cancel_requested and row.status == 'running':
                                                         self.current.cancel()
                                             await self.current
                                         except asyncio.CancelledError:
@@ -480,7 +493,9 @@ class InfrastructureService:
                                                 row = await stopped.get(Job, job.id)
                                                 if row.status in {'pending', 'running'}:
                                                     row.status = 'interrupted' if asyncio.current_task().cancelling() else 'cancelled'
+                                                    row.finished_at = utcnow()
                                                     await stopped.commit()
+                                            await publish_job(self, job.id, complete=True)
                                             if asyncio.current_task().cancelling():
                                                 raise
                                         finally:

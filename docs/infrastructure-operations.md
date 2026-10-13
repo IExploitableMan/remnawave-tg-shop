@@ -26,7 +26,7 @@ Server acceptance checks are required before production use.
 - Optionally mount your own automation key and set `INFRA_SSH_PRIVATE_KEY` to its
   path. Otherwise an Ed25519 key is created with private filesystem permissions.
 
-When enabled, **Admin → Infrastructure → Settings** selects the existing profile,
+When enabled, **Admin → Settings → Infrastructure → Settings** selects the existing profile,
 VLESS inbound on port 443, panel server IP and tg squad. The panel IP must be its
 actual outbound address toward nodes, not necessarily its reverse-proxy address.
 Debian 12/13 and Ubuntu 24.04 are supported. Root SSH password access is retained.
@@ -225,3 +225,32 @@ console tables retain their layout; upload/download metrics are independent.
 Country icons are local assets placed in existing padding; no CDN is queried at
 render time. Missing values and failures remain explicit. Renderer version 3
 rebuilds older reports from saved output without re-running measurements.
+
+## Operation queue and confirmed upgrades
+
+The infrastructure menu shows only pending/running operations in FIFO order.
+Waiting positions are relative; running checks show completed/total counts. Each
+operation has a persistent editable Telegram progress message. Its outcome is a
+separate message with node/action, elapsed time, diagnostic issues and relevant
+report/retry/node buttons; report files follow it. Telegram delivery failures do
+not roll back infrastructure work, and saved reports remain accessible separately.
+Operation history lives in the node card. Retry of a completed diagnostic starts
+a fresh measurement; retry of an interrupted/failed diagnostic reuses checkpoints.
+
+Add node lives in the Nodes section. The wizard shows the configured profile's
+name, supports selecting another profile for that installation and asks for a
+VLESS/443 inbound when the choice is ambiguous. Global defaults remain unchanged.
+
+The node upgrade button opens a read-only details screen first. It uses the node
+version reported by the panel and stable GitHub releases in the configured
+major/minor node release line. A current/newer node has no upgrade action. Unknown
+versions or failed release lookup require a refresh, rather than an assumed
+upgrade. Confirmation persists the target version in the job and execution
+revalidates it. Opening the screen does not run Ansible.
+
+Migration 0016 persists progress/completion message IDs, start time and confirmed
+upgrade target. Verification: 137 local tests and two real queued operational
+checks passed on the dedicated test bot on 2026-10-13. See the acceptance log.
+WARP/Psiphon integration is deferred at the owner's request.
+
+Final checkpoint-count polish: 56 focused infrastructure tests passed, including legacy extra-result handling. The diagnostic catalog is version 3. This changes rendering/progress bookkeeping only; no remote benchmark was run.

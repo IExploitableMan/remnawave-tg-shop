@@ -53,6 +53,12 @@ def diagnostic_plan(level, repeats=1):
             for test in catalog if iteration == 1 or test[0] not in ONCE_PER_JOB]
 
 
+def completed_checks(results, plan):
+    expected = {(test[0], iteration) for iteration, test in plan}
+    saved = {(result.get('id'), result.get('round')) for result in results}
+    return len(expected & saved)
+
+
 def privacy_patch(name, content):
     if name == 'ipcheck':
         # Disable report upload unconditionally, not merely through caller flags.
@@ -231,7 +237,7 @@ async def run_diagnostics(service, job, node, deployment, config):
                     test_id, title, script, command, timeout = test
                     if any(r.get('id') == test_id and r.get('round') == iteration for r in results):
                         continue
-                    await stage(service, job.id, f'{iteration}/{repeats}: {test_id}')
+                    await stage(service, job.id, f'test:{completed_checks(results, plan)}:{len(plan)}:{iteration}:{repeats}:{test_id}')
                     actual = f'bash {remote}/{script}.sh {command}' if script else command
                     # Every process group is isolated and bounded. Cancellation
                     # kills the process group, not just the SSH channel.
@@ -273,6 +279,7 @@ async def run_diagnostics(service, job, node, deployment, config):
                     result['metrics'] = result_measurements(result) or result['metrics']
                     results.append(result)
                     (directory / 'results.json').write_text(json.dumps(results, ensure_ascii=False, indent=2))
+                    await stage(service, job.id, f'test:{completed_checks(results, plan)}:{len(plan)}:{iteration}:{repeats}:{test_id}')
             finally:
                 await connection.run(f'rm -rf -- {remote}', timeout=30)
     await finalize_report(service, job, node, deployment, directory, results)
@@ -281,7 +288,7 @@ async def run_diagnostics(service, job, node, deployment, config):
 async def finalize_report(service, job, node, deployment, directory, results):
     manifest = {'node': node.name, 'address': deployment.address, 'level': job.kind,
                 'deployment_id': deployment.id, 'created_at': datetime.now(timezone.utc).isoformat(),
-                'results': results, 'catalog_version': 2}
+                'results': results, 'catalog_version': 3}
     (directory / 'results.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
     from .reports import render_reports
     artifacts = await asyncio.to_thread(render_reports, directory, manifest)
@@ -289,7 +296,7 @@ async def finalize_report(service, job, node, deployment, directory, results):
         session.add(Report(job_id=job.id, deployment_id=deployment.id, level=job.kind,
                            manifest=json.dumps({'directory': str(job.id), 'files': artifacts, 'renderer_version': 3})))
         await session.commit()
-    await send_artifacts(service, job.requested_by, directory, artifacts, job.kind)
+    # The worker delivers artifacts with the separate operation completion message.
 
 
 async def send_artifacts(service, admin_id, directory, artifacts, level):

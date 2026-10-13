@@ -82,6 +82,8 @@ async def stage(service, job_id, value):
         row = await session.get(Job, job_id)
         row.stage = value
         await session.commit()
+    from .job_messages import publish_job
+    await publish_job(service, job_id)
 
 
 async def provision(service, node, deployment, config, job_id):
@@ -233,7 +235,17 @@ async def run_job(service, job_id):
             await ansible(service, deployment, config, kind='keys')
         elif job.kind == 'upgrade':
             await stage(service, job_id, 'ansible')
-            deployment.node_version = config[f'node_version_{await service.panel.api_major()}']
+            from .versions import latest_node_version, version_tuple
+            approved = config[f'node_version_{await service.panel.api_major()}']
+            latest = await latest_node_version(approved)
+            target = job.target_version or approved
+            current = next((n for n in await service.api.nodes() if n['uuid'] == node.panel_uuid), {})
+            installed = (current.get('versions') or {}).get('node')
+            if not latest or version_tuple(target) != version_tuple(latest):
+                raise ValueError('Версия обновления изменилась или недоступна. Откройте экран обновления заново.')
+            if not version_tuple(installed) or version_tuple(installed) >= version_tuple(target):
+                raise ValueError('Обновление не требуется или текущая версия неизвестна.')
+            deployment.node_version = target
             await ansible(service, deployment, config, secret=await service.api.node_secret())
             from .diagnostics import quick_check
             await stage(service, job_id, 'verification')
@@ -259,10 +271,5 @@ async def run_job(service, job_id):
         row = await session.get(Job, job_id)
         row.status, row.result, row.finished_at = status, result[:500], datetime.now(timezone.utc)
         await session.commit()
-    try:
-        from .localization import admin_text, admin_error
-        message = await admin_text(service, job.requested_by, 'infra_job_result',
-            p0=job_id, p1=status, p2=html.escape(await admin_error(service, job.requested_by, result[:500])))
-        await service.bot.send_message(job.requested_by, message)
-    except Exception:
-        pass
+    from .job_messages import publish_job
+    await publish_job(service, job_id, complete=True)

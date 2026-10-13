@@ -22,6 +22,8 @@ from bot.services.infrastructure.settings import read_config, save_config, valid
 from bot.services.infrastructure.provisioning import host_key
 from bot.services.infrastructure.diagnostics import send_artifacts
 from bot.services.infrastructure.localization import bind_language, tr, localize_error
+from bot.services.infrastructure.job_messages import operation_label, operation_text, operation_buttons, publish_job, status_label
+from bot.services.infrastructure.versions import latest_node_version, version_tuple
 
 router = Router(name='admin_infrastructure')
 
@@ -76,7 +78,7 @@ async def card(callback, service, session, node_id):
     buttons = [(tr('infra_extend'), f'infra:extend:{node.id}'), (tr('infra_replace'), f'infra:replace:{node.id}'),
                (tr('infra_credentials'), f'infra:credentials:{node.id}'),
                (tr('infra_save_access'), f'infra:access:{node.id}'), (tr('infra_diagnostics'), f'infra:tests:{node.id}'),
-               (tr('infra_test_history'), f'infra:reports:{node.id}'), (tr('infra_restart'), f'infra:restart:{node.id}'),
+               (tr('infra_test_history'), f'infra:reports:{node.id}'), (tr('infra_operation_history'), f'infra:history:{node.id}'), (tr('infra_restart'), f'infra:restart:{node.id}'),
                (tr('infra_upgrade'), f'infra:upgrade:{node.id}'),
                (tr('infra_edit_access'), f'infra:edit:{node.id}'),
                (tr('infra_change_sni'), f'infra:sni:{node.id}'), (tr('infra_delete'), f'infra:delete:{node.id}')] + back()
@@ -149,10 +151,36 @@ async def advance(message, state, service, session, value):
         await ask(message, state, service, session)
     else:
         data = await state.get_data()
-        if data.get('replace_id'):
+        if data.get('profile_step'):
+            await choose_wizard_profile(message, state, service, session)
+        elif data.get('replace_id'):
             await confirmation(message, state, service)
         else:
             await choose_provider(message, state, service)
+
+
+async def choose_wizard_profile(message, state, service, session):
+    data = await state.get_data()
+    config = await read_config(session)
+    selected = data.get('profile_uuid') or config['profile_uuid']
+    profiles = await service.api.profiles()
+    profile = next((p for p in profiles if p['uuid'] == selected), None)
+    name = profile['name'] if profile else tr('infra_profile_missing')
+    await state.update_data(phase='profile', profile_uuid=selected, profile_name=name,
+        inbound_uuid=data.get('inbound_uuid') or config['inbound_uuid'])
+    await state.set_state(InfrastructureStates.input)
+    buttons = [(tr('infra_use_profile'), 'infra:wizard_profile_default')] if profile else []
+    buttons.append((tr('infra_choose_another_profile'), 'infra:wizard_profiles'))
+    await message.answer(tr('infra_wizard_profile', p0=html.escape(name)), reply_markup=keyboard(
+        buttons + back('infra:wizard_back')))
+
+
+async def finish_wizard_profile(message, state, service):
+    data = await state.get_data()
+    if data.get('replace_id'):
+        await confirmation(message, state, service)
+    else:
+        await choose_provider(message, state, service)
 
 
 async def choose_provider(message, state, service):
@@ -177,7 +205,7 @@ async def confirmation(message, state, service):
         return  # A Back/edit or newer selection must win over this SSH response.
     await state.update_data(host_public_key=public, phase='confirm')
     await state.set_state(InfrastructureStates.confirm)
-    await message.answer(tr('infra_confirm_install', p0=html.escape(data['address']), p1=html.escape(data['host_address']), p2=data['country'], p3=data['days'], p4=html.escape(fingerprint)),
+    await message.answer(tr('infra_confirm_install', p0=html.escape(data['address']), p1=html.escape(data['host_address']), p2=data['country'], p3=data['days'], p4=html.escape(fingerprint)) + (tr('infra_selected_profile', p0=html.escape(data['profile_name'])) if data.get('profile_name') else ''),
         reply_markup=keyboard([(tr('infra_install'), 'infra:install'), (tr('infra_cancel'), 'infra:home')] + back('infra:wizard_back')))
 
 
@@ -192,8 +220,17 @@ async def wizard_back(message, state, service, session, provider_form=False):
         return
     if data.get('flow') != 'wizard':
         raise ValueError(tr('infra_form_closed'))
+    if data.get('phase') == 'confirm' and data.get('replace_id') and data.get('profile_step'):
+        await choose_wizard_profile(message, state, service, session)
+        return
     if data.get('phase') == 'confirm' and not data.get('replace_id'):
         await choose_provider(message, state, service)
+        return
+    if data.get('profile_step') and data.get('phase') == 'providers':
+        await choose_wizard_profile(message, state, service, session)
+        return
+    if data.get('phase') in {'profile_list', 'profile_inbounds'}:
+        await choose_wizard_profile(message, state, service, session)
         return
     position = max(0, min(data['position'], len(data['steps'])) - 1)
     await state.update_data(position=position, phase='fields')
@@ -223,9 +260,13 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
     elif action in {'setting', 'profiles', 'squads', 'squad', 'pool', 'inbound'}: target = 'infra:settings'
     elif action == 'profile': target = 'infra:profiles'
     elif action in {'addkey', 'sync_keys'}: target = 'infra:keys'
-    elif action in {'tests', 'test', 'restart', 'upgrade', 'extend', 'access', 'edit', 'sni', 'credentials', 'delete', 'reports'}:
+    elif action in {'tests', 'test', 'restart', 'upgrade', 'extend', 'access', 'edit', 'sni', 'credentials', 'delete', 'reports', 'history', 'upgrade_confirm'}:
         target = f'infra:node:{argument}'
     elif action in {'job', 'cancel', 'retry'}: target = 'infra:jobs'
+    if action == 'job' and len(parts) > 4 and parts[3] == 'queue':
+        target = f'infra:jobs:{int(parts[4])}'
+    elif action == 'job' and len(parts) > 5 and parts[3] == 'history':
+        target = f'infra:history:{int(parts[4])}:{int(parts[5])}'
     elif action in {'notify', 'toggle_notify'}: target = 'infra:home'
     if action == 'addprovider' and data.get('flow') == 'wizard':
         target = 'infra:wizard_provider_back'
@@ -235,11 +276,11 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
     if action not in {'new', 'replace', 'default', 'keep', 'pickprovider', 'install', 'wizard_back', 'wizard_provider_back'}:
         await state.update_data(return_to=target)
     try:
-        if action in {'nodes', 'node', 'providers', 'provider', 'settings', 'keys', 'jobs', 'tests', 'reports', 'archive', 'notify'}:
+        if action in {'nodes', 'node', 'providers', 'provider', 'settings', 'keys', 'jobs', 'tests', 'reports', 'history', 'archive', 'notify'}:
             await state.clear()
         if action == 'home':
             await state.clear()
-            await show(callback, tr('infra_title'), [(tr('infra_nodes'), 'infra:nodes'), (tr('infra_add_node'), 'infra:new'),
+            await show(callback, tr('infra_title'), [(tr('infra_nodes'), 'infra:nodes'),
                 (tr('infra_providers'), 'infra:providers'), (tr('infra_settings'), 'infra:settings'), (tr('infra_ssh_keys'), 'infra:keys'),
                 (tr('infra_all_credentials'), 'infra:snapshot'), (tr('infra_notifications'), 'infra:notify'), (tr('infra_jobs'), 'infra:jobs'),
                 (tr('infra_archive'), 'infra:archive'),
@@ -258,7 +299,7 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             for node in await service.api.nodes():
                 if node['uuid'] not in known:
                     buttons.append((tr('infra_adopt', p0=node['name']), f"infra:adopt:{node['uuid']}"))
-            await show(callback, tr('infra_nodes_title'), buttons + back())
+            await show(callback, tr('infra_nodes_title'), buttons + [(tr('infra_add_node'), 'infra:new')] + back())
         elif action == 'adopt':
             node = await service.adopt(session, argument)
             await session.commit()
@@ -270,7 +311,7 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             if not config['profile_uuid'] or not config['inbound_uuid'] or not config['panel_ip']:
                 raise ValueError(tr('infra_configure_first'))
             await state.clear()
-            values = {'flow': 'wizard', 'phase': 'fields', 'steps': ['address', 'ssh_port', 'ssh_user', 'password', 'host_address', 'country', 'days'], 'position': 0}
+            values = {'flow': 'wizard', 'phase': 'fields', 'profile_step': True, 'steps': ['address', 'ssh_port', 'ssh_user', 'password', 'host_address', 'country', 'days'], 'position': 0}
             if action == 'replace':
                 node = await service.node(session, argument)
                 deployment = await service.deployment(session, node.id)
@@ -283,6 +324,34 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             await state.update_data(**values)
             await state.set_state(InfrastructureStates.input)
             await ask(callback.message, state, service, session)
+        elif action in {'wizard_profiles', 'wizard_profile', 'wizard_inbound', 'wizard_profile_default'}:
+            data = await state.get_data()
+            if data.get('flow') != 'wizard' or data.get('phase') not in {'profile', 'profile_list', 'profile_inbounds'}:
+                raise ValueError(tr('infra_form_closed'))
+            BACK_TARGET.set('infra:wizard_back')
+            if action == 'wizard_profiles':
+                await state.update_data(phase='profile_list')
+                profiles = await service.api.profiles()
+                await show(callback, tr('infra_choose_profile'), [(p['name'], f"infra:wizard_profile:{p['uuid']}") for p in profiles] + back())
+            else:
+                profile_uuid = argument if action == 'wizard_profile' else data.get('profile_uuid')
+                profile = next((p for p in await service.api.profiles() if p['uuid'] == profile_uuid), None)
+                if not profile:
+                    raise ValueError(tr('infra_profile_missing'))
+                inbounds = [i for i in await service.panel.get_inbounds_by_profile_uuid(profile_uuid, refresh=True) or []
+                    if str(i.get('port')) == '443' and i.get('type', '').lower() == 'vless']
+                selected = argument if action == 'wizard_inbound' else data.get('inbound_uuid') if action == 'wizard_profile_default' else None
+                inbound = next((i for i in inbounds if i['uuid'] == selected), None)
+                if not inbound and len(inbounds) == 1 and action != 'wizard_inbound':
+                    inbound = inbounds[0]
+                if not inbounds or (action == 'wizard_inbound' and not inbound):
+                    raise ValueError(tr('infra_no_vless_inbound'))
+                await state.update_data(profile_uuid=profile_uuid, profile_name=profile['name'], phase='profile_inbounds')
+                if inbound:
+                    await state.update_data(inbound_uuid=inbound['uuid'])
+                    await finish_wizard_profile(callback.message, state, service)
+                else:
+                    await show(callback, tr('infra_choose_inbound'), [(i['tag'], f"infra:wizard_inbound:{i['uuid']}") for i in inbounds] + back())
         elif action == 'keep':
             data = await state.get_data()
             if data.get('flow') != 'wizard' or data['position'] >= len(data['steps']):
@@ -323,7 +392,8 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             await session.commit()
             await state.clear()
             BACK_TARGET.set('infra:nodes')
-            await show(callback, tr('infra_node_queued', p0=html.escape(node.name), p1=job.id), back())
+            await publish_job(service, job.id)
+            await show(callback, tr('infra_operation_added', p0=html.escape(node.name)), back())
         elif action == 'providers':
             providers = await service.api.providers()
             await show(callback, tr('infra_providers'), [(p['name'], f"infra:provider:{p['uuid']}") for p in providers] +
@@ -439,7 +509,41 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             await show(callback, tr('infra_test_levels'),
                 [(tr('infra_small_test'), f'infra:test:{argument}:small'), (tr('infra_medium_test'), f'infra:test:{argument}:medium'),
                  (tr('infra_large_test'), f'infra:test:{argument}:large')] + back())
-        elif action in {'test', 'restart', 'upgrade'}:
+        elif action in {'upgrade', 'upgrade_confirm'}:
+            node = await service.node(session, argument)
+            await service.refresh_node(session, node)
+            deployment = await service.deployment(session, node.id)
+            current = next((n for n in await service.api.nodes() if n['uuid'] == node.panel_uuid), {})
+            installed = (current.get('versions') or {}).get('node')
+            config = await read_config(session)
+            approved = config[f'node_version_{await service.panel.api_major()}']
+            latest = await latest_node_version(approved)
+            await session.commit()
+            can_upgrade = bool(version_tuple(installed) and version_tuple(latest)
+                               and version_tuple(installed) < version_tuple(latest))
+            if action == 'upgrade_confirm':
+                if not can_upgrade or len(parts) < 4 or parts[3] != latest:
+                    raise ValueError(tr('infra_upgrade_changed'))
+                if not deployment:
+                    raise ValueError(tr('infra_save_access_first'))
+                await service.validate_deployment(session, node, deployment)
+                job = await service.enqueue(session, node, deployment, 'upgrade', callback.from_user.id)
+                job.target_version = latest
+                await session.commit()
+                await publish_job(service, job.id)
+                await show(callback, tr('infra_operation_added', p0=html.escape(node.name)), back())
+            else:
+                text_value = tr('infra_upgrade_details', p0=html.escape(node.name),
+                    p1=html.escape(installed or tr('infra_version_unknown')),
+                    p2=html.escape(latest or tr('infra_version_unavailable')), p3='.'.join(approved.split('.')[:2]))
+                buttons = [(tr('infra_upgrade_confirm'), f'infra:upgrade_confirm:{node.id}:{latest}')] if can_upgrade and deployment else []
+                if version_tuple(installed) and version_tuple(latest) and version_tuple(installed) >= version_tuple(latest):
+                    text_value += '\n' + tr('infra_up_to_date')
+                elif not installed:
+                    text_value += '\n' + tr('infra_version_refresh_hint')
+                buttons.append((tr('infra_refresh'), f'infra:upgrade:{node.id}'))
+                await show(callback, text_value, buttons + back())
+        elif action in {'test', 'restart'}:
             node = await service.node(session, argument)
             deployment = await service.deployment(session, node.id)
             if not deployment:
@@ -450,28 +554,71 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
                 raise ValueError(tr('infra_unknown_action'))
             job = await service.enqueue(session, node, deployment, kind, callback.from_user.id)
             await session.commit()
-            await callback.message.answer(tr('infra_job_queued', p0=job.id), reply_markup=keyboard(back()))
-        elif action == 'jobs':
-            jobs = (await session.execute(select(Job).join(Node).where(Node.panel_scope == service.scope).order_by(Job.id.desc()).limit(30))).scalars().all()
-            await show(callback, '\n'.join(f'#{j.id} {j.kind}: {j.status} / {html.escape(j.stage)}' for j in jobs) or tr('infra_no_jobs'),
-                [(f'#{j.id}', f'infra:job:{j.id}') for j in jobs] + back())
+            await publish_job(service, job.id)
+            await show(callback, tr('infra_operation_added', p0=html.escape(node.name)), back())
+        elif action in {'jobs', 'history'}:
+            page = max(0, int(argument or 0)) if action == 'jobs' else max(0, int(parts[3]) if len(parts) > 3 else 0)
+            query = select(Job, Node).join(Node).where(Node.panel_scope == service.scope)
+            if action == 'jobs':
+                query = query.where(Job.status.in_(['pending', 'running'])).order_by(Job.id)
+            else:
+                node = await service.node(session, argument, include_deleted=True)
+                query = query.where(Job.node_id == node.id).order_by(Job.id.desc())
+                BACK_TARGET.set(f'infra:node:{node.id}')
+            rows = (await session.execute(query.offset(page * 6).limit(7))).all()
+            buttons = []
+            waiting_order = {}
+            if action == 'jobs':
+                pending = (await session.execute(select(Job.id).join(Node).where(Node.panel_scope == service.scope,
+                    Job.status == 'pending').order_by(Job.id))).scalars().all()
+                waiting_order = {job_id: index + 1 for index, job_id in enumerate(pending)}
+            for job, node in rows[:6]:
+                prefix = '▶️' if job.status == 'running' else f'{waiting_order.get(job.id, 1)}.' if action == 'jobs' else ''
+                label = f'{prefix} {operation_label(job, node, tr)}'.strip()
+                if action == 'history':
+                    label += ' · ' + status_label(job, tr)
+                elif job.status == 'running' and job.stage.startswith('test:'):
+                    progress = job.stage.split(':')
+                    label += f' · {progress[1]}/{progress[2]}'
+                context = f'queue:{page}' if action == 'jobs' else f'history:{argument}:{page}'
+                buttons.append((label, f'infra:job:{job.id}:{context}'))
+            base = 'infra:jobs' if action == 'jobs' else f'infra:history:{argument}'
+            if page:
+                buttons.append((tr('infra_page_previous'), f'{base}:{page - 1}'))
+            if len(rows) > 6:
+                buttons.append((tr('infra_page_next'), f'{base}:{page + 1}'))
+            if action == 'jobs':
+                buttons.append((tr('infra_refresh'), f'{base}:{page}'))
+            title = tr('infra_queue_title') if action == 'jobs' else tr('infra_operation_history')
+            await show(callback, title + ('\n' + tr('infra_queue_empty') if not rows else ''), buttons + back())
         elif action in {'job', 'cancel', 'retry'}:
             job = await session.get(Job, int(argument))
             if not job:
                 raise ValueError(tr('infra_job_not_found'))
-            node = await service.node(session, job.node_id)
+            node = await service.node(session, job.node_id, include_deleted=True)
             if action == 'cancel':
+                if job.status not in {'pending', 'running'}:
+                    raise ValueError(tr('infra_operation_finished'))
                 if job.status == 'pending':
                     job.status = 'cancelled'
+                    job.finished_at = datetime.now(timezone.utc)
                 else:
                     job.cancel_requested = True
                 await session.commit()
             elif action == 'retry':
-                if job.status not in {'failed', 'interrupted', 'cancelled'}:
+                if job.kind == 'upgrade':
+                    raise ValueError(tr('infra_upgrade_changed'))
+                if job.status not in {'failed', 'interrupted', 'cancelled'} and not (job.status == 'done' and job.kind in {'small', 'medium', 'large', 'restart', 'keys'}):
                     raise ValueError(tr('infra_cannot_retry'))
+                if node.deleted:
+                    raise ValueError(tr('infra_operation_finished'))
                 deployment = await session.get(Deployment, job.deployment_id)
+                if job.kind != 'provision':
+                    if deployment.state != 'active':
+                        raise ValueError(tr('infra_deployment_replaced'))
+                    await service.validate_deployment(session, node, deployment)
                 new_job = await service.enqueue(session, node, deployment, job.kind, callback.from_user.id)
-                if job.kind in {'medium', 'large'}:
+                if job.kind in {'medium', 'large'} and job.status != 'done':
                     source = Path(settings.INFRA_ARTIFACT_DIR) / 'reports' / str(job.id) / 'results.json'
                     if source.exists():
                         import shutil
@@ -479,12 +626,16 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
                         target.mkdir(mode=0o700, parents=True, exist_ok=True)
                         shutil.copyfile(source, target / 'results.json')
                 await session.commit()
-                await callback.message.answer(tr('infra_retry_queued', p0=new_job.id), reply_markup=keyboard(back()))
+                await publish_job(service, new_job.id)
+                await show(callback, tr('infra_operation_added', p0=html.escape(node.name)), back())
             else:
-                buttons = [(tr('infra_stop'), f'infra:cancel:{job.id}')] if job.status in {'pending', 'running'} else []
-                if job.status in {'failed', 'interrupted', 'cancelled'}:
-                    buttons.append((tr('infra_retry'), f'infra:retry:{job.id}'))
-                await show(callback, f'#{job.id}: {job.status}\n{html.escape(job.stage)}\n{html.escape(job.result or "")}', buttons + back())
+                report = (await session.execute(select(Report).where(Report.job_id == job.id))).scalar_one_or_none()
+                markup = operation_buttons(job, tr, report.id if report else None)
+                buttons = [(row[0].text, row[0].callback_data) for row in markup.inline_keyboard]
+                await show(callback, operation_text(job, node, tr), buttons + back())
+            if action == 'cancel':
+                await publish_job(service, job.id, complete=job.status == 'cancelled')
+                await show(callback, tr('infra_cancel_requested'), back())
         elif action == 'reports':
             node = await service.node(session, argument, include_deleted=True)
             reports = (await session.execute(select(Report, Deployment.address).join(Deployment).where(

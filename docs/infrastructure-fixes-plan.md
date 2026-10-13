@@ -69,3 +69,33 @@ idle-job check. Migration 0015, polling and exact source hashes were confirmed.
 Evidence: `/tmp/infra-report-polish/final-tests.log`, `stand-deploy.log`,
 `stand-code-check.log`, and `preview/report.pdf`. The flag/PDF render checks
 passed again after the final image-layout adjustment. Production was untouched.
+
+## Agreed queue and node workflow follow-up
+
+- [x] Show only pending/running operations in the queue, with relative positions and readable node/action labels.
+- [x] Send one editable progress message per operation and a separate completion message with artifacts and contextual retry/report/node actions.
+- [x] Keep readable operation history on the node card.
+- [x] Add per-installation profile selection by name, defaulting to the configured profile; retain wizard data and resolve the selected VLESS inbound.
+- [x] Open an upgrade details/confirmation screen with actual installed version and latest compatible release; omit the upgrade action when current. Revalidate before execution.
+- [x] Move Add node into the Nodes section (verified on the test deployment).
+- [x] Refresh documentation/navigation references and verify the approved follow-up on the test bot.
+
+WARP/Psiphon egress options are under research only; installation or routing changes have not been requested yet.
+
+Follow-up verification: 137 Python 3.12 tests passed against the dedicated test
+PostgreSQL, followed by 13 focused handler tests after navigation polish. Syntax,
+locale JSON and diff checks passed. Migration 0016 and exact deployed hashes were
+verified on the test bot. Two live operational-only checks (audit IDs 30 and 31)
+ran serially on the existing 104.252.89.173 node; distinct progress/completion
+message IDs and report records persisted. Completed jobs disappeared from the
+queue. The live upgrade screen retrieved node/GitHub version 3.4.2 and offered
+no upgrade action. Default profile name/inbound and Add node placement were
+verified against the real panel through the handlers without installing a VPS.
+No quality/speed benchmarks or production deployment occurred. Evidence is in
+`/tmp/infra-queue-followup/{tests-final,handler-tests,stand-deploy,stand-hashes,live-checks}.log`.
+
+Latest release discovery is restricted to the configured node major/minor line;
+this avoids assuming every newer node release works with an older panel. Failed
+lookups or unknown installed versions do not expose an upgrade action.
+
+Final checkpoint-count polish: 56 focused infrastructure tests passed, including legacy extra-result handling. The diagnostic catalog is version 3. This changes rendering/progress bookkeeping only; no remote benchmark was run.

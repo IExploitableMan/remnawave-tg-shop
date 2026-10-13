@@ -220,3 +220,29 @@ low priority; that optional synchronization was not added in this correction.
 Evidence: `/tmp/infra-localization-tail/`.
 
 The correction was deployed to the authorized @cridpugbot on 154.86.119.144 after an empty-queue check. Polling startup and exact deployed source/locale hashes were verified; production was untouched.
+
+## WARP pilot, 2026-10-13
+
+Manual setup only; bot/Ansible integration remains a later step. Node
+104.252.89.173 now has a native WARP tunnel, watchdog and persistent marked
+IPv4/IPv6 direct-fallback guards. A separate Acceptance WARP Pilot profile
+protects node77 at 95.182.88.203 from changes to the shared original profile.
+The original node/host IDs and SSH access were preserved. Private backups and
+an unexecuted rollback helper are available.
+
+Real external VLESS requests confirmed Cloudflare exit 104.28.211.192 for a
+temporarily selected trace destination, and direct exit 104.252.89.173 for
+ordinary traffic. With WARP stopped, selected traffic failed while ordinary
+traffic kept working; starting WARP recovered the selected route. The temporary
+trace selector was removed. Tunnel/watchdog/guard/node running state was checked.
+
+Gemini's country-rejection phrase was absent from both direct and WARP HTML.
+Direct and WARP-only browser sessions reached the anonymous prompt interface,
+so the original country failure could not be reproduced on this French node.
+The SOCKS/VLESS browser consent flow did not consistently dismiss its dialog;
+this is an unresolved UI-level verification limitation, not a proven Gemini
+account unlock. The owner was given a private 24-hour test link for checking
+their actual account. No benchmark or production change was performed.
+
+See infrastructure-warp-pilot.md and `/tmp/infra-warp-pilot/` for evidence,
+private-backup locations, isolated routing scope and rollback instructions.

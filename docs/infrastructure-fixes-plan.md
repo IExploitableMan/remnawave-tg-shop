@@ -47,3 +47,25 @@ Local evidence: `/tmp/infra-ui-fixes/final-all-tests.log`,
 `stand-verify.log`, `stand-code-check.log`, and `preview/report.pdf`.
 The initial six-second polling-log check was too early; follow-up verification
 confirmed successful startup.
+
+## Approved follow-up: existing access and concise reports
+
+- [x] Separate SSH-only capture from explicit client-host editing. Existing nodes
+  can have multiple hosts/inbounds; saving credentials does not patch the panel.
+- [x] Keep imported nodes out of automatic host exclusion; preserve existing bot
+  provisioning behavior. Add migration 0015 and record panel address independently
+  of SSH address for safe change detection.
+- [x] Keep upload/download independent, including partial failures and busy peers.
+- [x] Add local flag icons without shifting console columns.
+- [x] Replace UDP/sustained JSON dumps with concise summaries and interval tables;
+  summarize DNS/CDN while keeping their errors. Retain raw data separately.
+- [x] Capture IP/region/service facts once per job; repeat performance measurements.
+  Remove the duplicate IP Check invocation that already includes IP quality.
+- [x] Verify with 128 Python 3.12 tests on a fresh dedicated PostgreSQL database,
+  migrations, syntax checks and an offline PDF preview. No live benchmarks run.
+
+The follow-up was deployed to the authorized `@cridpugbot` stand after another
+idle-job check. Migration 0015, polling and exact source hashes were confirmed.
+Evidence: `/tmp/infra-report-polish/final-tests.log`, `stand-deploy.log`,
+`stand-code-check.log`, and `preview/report.pdf`. The flag/PDF render checks
+passed again after the final image-layout adjustment. Production was untouched.

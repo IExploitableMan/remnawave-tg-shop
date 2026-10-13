@@ -70,9 +70,12 @@ async def card(callback, service, session, node_id):
         text_value += tr('infra_paid_until', p0=html.escape(entry['nextBillingAt']))
     else:
         text_value += tr('infra_unknown_deadline')
+    if not node.host_automation:
+        text_value += tr('infra_access_only_mode')
     text_value += tr('infra_tg_access') + (tr('infra_excluded') if node.excluded_tg else tr('infra_not_excluded'))
     buttons = [(tr('infra_extend'), f'infra:extend:{node.id}'), (tr('infra_replace'), f'infra:replace:{node.id}'),
-               (tr('infra_credentials'), f'infra:credentials:{node.id}'), (tr('infra_diagnostics'), f'infra:tests:{node.id}'),
+               (tr('infra_credentials'), f'infra:credentials:{node.id}'),
+               (tr('infra_save_access'), f'infra:access:{node.id}'), (tr('infra_diagnostics'), f'infra:tests:{node.id}'),
                (tr('infra_test_history'), f'infra:reports:{node.id}'), (tr('infra_restart'), f'infra:restart:{node.id}'),
                (tr('infra_upgrade'), f'infra:upgrade:{node.id}'),
                (tr('infra_edit_access'), f'infra:edit:{node.id}'),
@@ -220,7 +223,7 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
     elif action in {'setting', 'profiles', 'squads', 'squad', 'pool', 'inbound'}: target = 'infra:settings'
     elif action == 'profile': target = 'infra:profiles'
     elif action in {'addkey', 'sync_keys'}: target = 'infra:keys'
-    elif action in {'tests', 'test', 'restart', 'upgrade', 'extend', 'edit', 'sni', 'credentials', 'delete', 'reports'}:
+    elif action in {'tests', 'test', 'restart', 'upgrade', 'extend', 'access', 'edit', 'sni', 'credentials', 'delete', 'reports'}:
         target = f'infra:node:{argument}'
     elif action in {'job', 'cancel', 'retry'}: target = 'infra:jobs'
     elif action in {'notify', 'toggle_notify'}: target = 'infra:home'
@@ -423,12 +426,13 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
         elif action == 'credentials':
             for content in await service.snapshot(session, int(argument)):
                 await callback.message.answer(content)
-        elif action in {'extend', 'edit', 'sni'}:
+        elif action in {'extend', 'access', 'edit', 'sni'}:
             node = await service.node(session, argument)
             await state.update_data(flow=action, node_id=node.id)
             await state.set_state(InfrastructureStates.input)
             prompt = {'extend': tr('infra_ask_extension', p0=node.period_days),
-                'edit': tr('infra_ask_access'),
+                'access': tr('infra_ask_ssh_only'),
+                'edit': tr('infra_ask_host_only'),
                 'sni': tr('infra_ask_sni')}[action]
             await callback.message.answer(prompt, reply_markup=keyboard(back()))
         elif action == 'tests':
@@ -500,7 +504,7 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             if action == 'report_raw':
                 await service.bot.send_document(callback.from_user.id, types.FSInputFile(directory / 'results.json'))
             else:
-                if manifest.get('renderer_version') != 2:
+                if manifest.get('renderer_version') != 3:
                     source = directory / 'results.json'
                     if not source.exists():
                         raise ValueError(tr('infra_report_source_missing'))
@@ -511,7 +515,7 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
                     await callback.message.answer(tr('infra_rendering_saved'))
                     from bot.services.infrastructure.reports import render_reports
                     manifest['files'] = await asyncio.to_thread(render_reports, directory, saved)
-                    manifest['renderer_version'] = 2
+                    manifest['renderer_version'] = 3
                     report.manifest = json.dumps(manifest)
                     await session.commit()
                 await send_artifacts(service, callback.from_user.id, directory, manifest['files'], report.level)
@@ -624,61 +628,26 @@ async def infrastructure_input(message: types.Message, state: FSMContext, sessio
             node = await service.node(session, data['node_id'])
             deadline = await service.extend(session, node, int(parts[0]), amount)
             await message.answer(tr('infra_extended_until', p0=f'{deadline:%d.%m.%Y %H:%M UTC}'))
-        elif flow == 'edit':
+        elif flow == 'access':
             entries = value.splitlines()
-            if len(entries) != 5:
-                raise ValueError(tr('infra_five_lines'))
-            address, port, user, password, host_address = entries
-            address, host_address = validate_address(address), validate_address(host_address)
-            port = int(port)
-            if not 1 <= port <= 65535 or user != 'root' or not password:
-                raise ValueError(tr('infra_check_access'))
+            if len(entries) != 4:
+                raise ValueError(tr('infra_four_access_lines'))
+            address, port, user, password = entries
             node = await service.node(session, data['node_id'])
-            current_node = await service.refresh_node(session, node)
-            deployment = await service.deployment(session, node.id)
-            public, fingerprint = await host_key(address, port)
-            async with asyncssh.connect(host=address, port=port, username=user, password=password,
-                    client_keys=[], known_hosts=([asyncssh.import_public_key(public)], [], []),
-                    connect_timeout=20, login_timeout=20):
-                pass  # Verify the supplied password before replacing saved access.
-            if not deployment:
-                panel_node = await service.api.call('GET', f'/nodes/{node.panel_uuid}')
-                cp = panel_node['configProfile']
-                inbounds = cp['activeInbounds']
-                if len(inbounds) != 1 or not node.host_uuid:
-                    raise ValueError(tr('infra_ambiguous_host'))
-                entry = await service.billing_entry(session, node)
-                deployment = Deployment(node_id=node.id, state='active', address=address, host_address=host_address,
-                    ssh_port=port, ssh_user=user, credentials=service.cipher().encrypt(password.encode()).decode(),
-                    host_public_key=public, profile_uuid=cp['activeConfigProfileUuid'],
-                    inbound_uuid=inbounds[0]['uuid'] if isinstance(inbounds[0], dict) else inbounds[0],
-                    node_version=(panel_node.get('versions') or {}).get('node') or 'unknown',
-                    paid_until=datetime.fromisoformat(entry['nextBillingAt'].replace('Z', '+00:00')) if entry else None)
-                session.add(deployment)
-            else:
-                if address != deployment.address:
-                    if not current_node or validate_address(current_node['address']) != address:
-                        raise ValueError(tr('infra_use_replace'))
-                    # Adopt an IP changed directly in the panel as a new physical
-                    # deployment; previous credentials and reports retain history.
-                    previous = deployment
-                    previous.state = 'replaced'
-                    deployment = Deployment(node_id=node.id, state='active', address=address,
-                        host_address=host_address, ssh_port=port, ssh_user=user,
-                        credentials=service.cipher().encrypt(password.encode()).decode(),
-                        host_public_key=public, profile_uuid=previous.profile_uuid,
-                        inbound_uuid=previous.inbound_uuid, node_version=previous.node_version,
-                        paid_until=previous.paid_until)
-                    session.add(deployment)
-                deployment.ssh_port, deployment.ssh_user = port, user
-                deployment.credentials = service.cipher().encrypt(password.encode()).decode()
-                deployment.host_public_key, deployment.host_address = public, host_address
-            if not node.host_uuid:
-                raise ValueError(tr('infra_ambiguous_host'))
-            await service.api.call('PATCH', '/hosts', {'uuid': node.host_uuid, 'address': host_address})
+            deployment, fingerprint = await service.save_access(session, node, address, int(port), user, password)
             await session.commit()
             await service.publish_snapshots()
             await message.answer(tr('infra_credentials_saved', p0=html.escape(fingerprint)))
+        elif flow == 'edit':
+            node = await service.node(session, data['node_id'])
+            await service.refresh_node(session, node)
+            if not node.host_uuid:
+                raise ValueError(tr('infra_ambiguous_host'))
+            address = validate_address(value)
+            await service.api.call('PATCH', '/hosts', {'uuid': node.host_uuid, 'address': address})
+            deployment = await service.deployment(session, node.id)
+            if deployment:
+                deployment.host_address = address
         elif flow == 'sni':
             sni = validate_hostname(value)
             node = await service.node(session, data['node_id'])

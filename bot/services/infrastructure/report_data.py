@@ -139,40 +139,85 @@ def parse_result(result):
             if match and re.search(r'available|blocked|denied|timeout|reset|\bOK\b', match[2], re.I):
                 services.append({'label': match[1], 'value': match[2].strip(), 'status': service_status(match[2])})
     if kind in ('ru_speed', 'tlab_speed', 'yabs', 'bench'):
-        family = ''
-        for line in lines:
-            if 'Network Speed Tests (IPv' in line:
-                family = 'IPv6' if '(IPv6)' in line else 'IPv4'
-            speeds = list(SPEED.finditer(line))
-            if not speeds and re.search(r'busy|failed|N/A', line, re.I):
-                row = columns(line)
-                if len(row) >= 3 and row[0] not in ('Provider', 'Node Name'):
-                    services.append({'label': row[0], 'value': 'Нет замера', 'status': 'unknown'})
-            if not speeds or (kind == 'yabs' and '|' not in line) or 'Total' in line:
-                continue
-            label = line[:speeds[0].start()].strip(' |')
-            if not label or re.search(r'I/O|average|read|write|Block Size', label, re.I):
-                continue
-            numbers = [float(m[1]) * (1000 if m[2] in ('Gbits/sec', 'Gbit/s') else 1) for m in speeds]
-            # YABS/bench/tlab send/receive; itdog's Russian table down/up.
-            reverse = kind in ('yabs', 'bench', 'tlab_speed')
-            download = numbers[1] if reverse and len(numbers) > 1 else numbers[0]
-            upload = numbers[0] if reverse else (numbers[1] if len(numbers) > 1 else None)
-            label = re.sub(r'\s*\|\s*', ' · ', label)
-            if family:
-                label = f'{label} [{family}]'
-            bars.append({'label': label, 'value': download,
-                         'unit': 'Mbps', 'upload': upload})
+        bars = network_rows(output, kind)
+        valid = [b['value'] for b in bars if b['value'] is not None]
         if bars:
-            facts += [('Макс ↓', f"{max(b['value'] for b in bars):.1f} Mbps"), ('Направлений', str(len(bars)))]
+            if valid:
+                facts.append(('Макс ↓', f"{max(valid):.1f} Mbps"))
+            facts.append(('Направлений', str(len(bars))))
     return {'facts': list(dict.fromkeys(facts)), 'services': services, 'bars': bars, 'disk': disk}
+
+
+def speed_value(cell):
+    match = SPEED.search(cell)
+    if match:
+        multiplier = 1000 if match[2] in ('Gbits/sec', 'Gbit/s') else (8000 if match[2] == 'GB/s' else (8 if match[2] == 'MB/s' else 1))
+        return float(match[1]) * multiplier, 'ok'
+    status = re.search(r'(?i)(?:Download|Upload) failed|failed|busy|N/A|timeout', cell)
+    return None, status[0] if status else 'N/A'
+
+
+def network_rows(output, kind):
+    """Keep directions independent, including a successful upload/failed download."""
+    rows, family = [], ''
+    for line in output.splitlines():
+        if 'Network Speed Tests (IPv' in line:
+            family = 'IPv6' if '(IPv6)' in line else 'IPv4'
+        if re.search(r'^(?:\s*)(?:Read|Write|Total|Block Size|Node Name|Provider)\b|I/O|average|CPU|RAM', line, re.I):
+            continue
+        if not SPEED.search(line) and not re.search(r'failed|busy|N/A|timeout', line, re.I):
+            continue
+        if kind == 'yabs' and '|' not in line:
+            continue
+        parts = columns(line)
+        if not parts:
+            continue
+        send_first = kind in ('yabs', 'bench', 'tlab_speed')
+        if '|' in line and len(parts) >= 4:
+            tail = 2 if SPEED.search(parts[-1]) or re.search(r'failed|busy|N/A|timeout', parts[-1], re.I) else 3
+            label = ' · '.join(parts[:-tail])
+            first, second = parts[-tail], parts[-tail+1]
+        elif len(parts) >= 3:
+            label, first, second = parts[0], parts[1], parts[2]
+        else:
+            # Explicit failure labels can identify a missing direction even when
+            # blank columns collapse. Never use the sole success for both sides.
+            matches = list(SPEED.finditer(line))
+            failed = re.search(r'(?i)(Download|Upload) failed', line)
+            if not failed:
+                continue
+            label = line[:min(matches[0].start() if matches else failed.start(), failed.start())].strip(' |')
+            success = matches[0][0] if matches else 'N/A'
+            upload, download = (success, failed[0]) if failed[1].lower() == 'download' else (failed[0], success)
+            first, second = (upload, download) if send_first else (download, upload)
+        if not label:
+            continue
+        failed_down = re.search(r'Download failed', line, re.I)
+        failed_up = re.search(r'Upload failed', line, re.I)
+        if failed_down or failed_up:
+            success = SPEED.search(line)
+            up = 'Upload failed' if failed_up else (success[0] if success else 'N/A')
+            down = 'Download failed' if failed_down else (success[0] if success else 'N/A')
+            first, second = (up, down) if send_first else (down, up)
+        first_value, first_status = speed_value(first)
+        second_value, second_status = speed_value(second)
+        if not any(v is not None for v in (first_value, second_value)) and first_status == second_status == 'N/A':
+            continue
+        upload, download = ((first_value, second_value) if send_first else (second_value, first_value))
+        upload_status, download_status = ((first_status, second_status) if send_first else (second_status, first_status))
+        if family:
+            label += f' [{family}]'
+        rows.append({'label': label, 'value': download, 'upload': upload, 'unit': 'Mbps',
+            'download_status': download_status, 'upload_status': upload_status})
+    return rows
 
 
 def result_measurements(result):
     data = parse_result(result)
     metrics = {}
     for row in data['bars']:
-        metrics[f"{row['label']} download [Mbps]"] = row['value']
+        if row['value'] is not None:
+            metrics[f"{row['label']} download [Mbps]"] = row['value']
         if row['upload'] is not None:
             metrics[f"{row['label']} upload [Mbps]"] = row['upload']
     for label, value in data['facts']:

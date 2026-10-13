@@ -168,7 +168,7 @@ class InfrastructureHandlerTests(unittest.IsolatedAsyncioTestCase):
                 await self.click('infra:report:19')
             ssh.assert_not_awaited()
             self.service.api.call.assert_not_awaited()
-            self.assertEqual(json.loads(report.manifest)['renderer_version'], 2)
+            self.assertEqual(json.loads(report.manifest)['renderer_version'], 3)
             self.assertTrue((root/'report.pdf').exists())
             self.assertEqual(self.service.bot.send_document.await_args.args[1].path, root/'report.pdf')
             self.assertEqual(self.message.answer.await_args.kwargs['reply_markup'].inline_keyboard[-1][0].callback_data, 'infra:reports:1')

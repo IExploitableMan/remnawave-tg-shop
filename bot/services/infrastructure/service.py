@@ -151,7 +151,7 @@ class InfrastructureService:
             Node.panel_scope == self.scope, Node.deleted.is_(False), Deployment.state.in_(['active', 'pending'])))).scalars().all()
         pool = config['sni_ru'] if node.country == 'RU' else config['sni_other']
         deployment = Deployment(node_id=node.id, address=values['address'],
-            host_address=values.get('host_address') or values['address'],
+            host_address=values.get('host_address') or values['address'], panel_address=values['address'],
             ssh_port=int(values.get('ssh_port', 22)), ssh_user=values.get('ssh_user', 'root'),
             credentials=self.cipher().encrypt(values['password'].encode()).decode(),
             host_public_key=values['host_public_key'],
@@ -174,7 +174,7 @@ class InfrastructureService:
         if hosts is None:
             raise RuntimeError('Не удалось получить hosts')
         candidates = [h for h in hosts if h.get('nodes') == [panel_uuid]]
-        node = Node(panel_scope=self.scope, panel_uuid=panel_uuid,
+        node = Node(panel_scope=self.scope, panel_uuid=panel_uuid, host_automation=False,
                     host_uuid=candidates[0]['uuid'] if len(candidates) == 1 else None,
                     name=node_data['name'], country=node_data['countryCode'],
                     provider_uuid=node_data.get('providerUuid') or '', period_days=30)
@@ -231,9 +231,61 @@ class InfrastructureService:
         # Credentials/host-key cannot be reused safely just because metadata changed.
         return current
 
+    async def save_access(self, session, node, address, port, user, password):
+        """Verify and store SSH credentials; panel settings and VPS stay untouched."""
+        import asyncssh
+        from .provisioning import host_key
+        address = validate_address(address)
+        if not 1 <= port <= 65535 or user != 'root' or not password or '\n' in password:
+            raise ValueError('Проверьте порт, root-логин и пароль')
+        await session.execute(select(Node.id).where(Node.id == node.id).with_for_update())
+        if (await session.execute(select(Job.id).where(Job.node_id == node.id,
+                Job.status.in_(['pending', 'running'])))).first():
+            raise ValueError('Дождитесь завершения заданий перед изменением SSH-доступа')
+        current = await self.refresh_node(session, node)
+        if not current:
+            raise ValueError('Нода панели не найдена')
+        public, fingerprint = await host_key(address, port)
+        async with asyncssh.connect(host=address, port=port, username=user, password=password,
+                client_keys=[], known_hosts=([asyncssh.import_public_key(public)], [], []),
+                connect_timeout=20, login_timeout=20):
+            pass
+        previous = await self.deployment(session, node.id)
+        cp = current.get('configProfile') or {}
+        inbounds = cp.get('activeInbounds') or []
+        inbound = inbounds[0] if len(inbounds) == 1 else None
+        if isinstance(inbound, dict):
+            inbound = inbound['uuid']
+        entry = await self.billing_entry(session, node)
+        new_identity = (not previous or previous.address != address or previous.host_public_key != public
+            or (previous.panel_address and previous.panel_address != current['address']))
+        if new_identity:
+            if previous:
+                previous.state = 'replaced'
+            deployment = Deployment(node_id=node.id, state='active', address=address,
+                host_address=previous.host_address if previous else current['address'],
+                profile_uuid=cp.get('activeConfigProfileUuid'), inbound_uuid=inbound,
+                node_version=(current.get('versions') or {}).get('node') or 'unknown',
+                paid_until=datetime.fromisoformat(entry['nextBillingAt'].replace('Z', '+00:00')) if entry else None)
+            session.add(deployment)
+        else:
+            deployment = previous
+        deployment.ssh_port, deployment.ssh_user = port, user
+        deployment.credentials = self.cipher().encrypt(password.encode()).decode()
+        deployment.host_public_key = public
+        deployment.panel_address = current['address']
+        # Read the unique host address if present, but never create or patch hosts.
+        if node.host_uuid:
+            hosts = await self.panel.get_all_hosts()
+            host = next((h for h in hosts or [] if h['uuid'] == node.host_uuid), None)
+            if host:
+                deployment.host_address = host['address']
+        await session.flush()
+        return deployment, fingerprint
+
     async def validate_deployment(self, session, node, deployment):
         current = await self.refresh_node(session, node)
-        if current and validate_address(current['address']) != validate_address(deployment.address):
+        if current and validate_address(current['address']) != validate_address(getattr(deployment, 'panel_address', None) or deployment.address):
             raise ValueError('IP ноды изменён в панели. Сохраните SSH-доступ нового сервера перед запуском задания.')
 
     async def billing_entry(self, session, node, billing=None):
@@ -483,7 +535,7 @@ class InfrastructureService:
                             await app_settings_dal.upsert_setting(session, marker, deadline.isoformat())
                         except Exception:
                             logging.warning('Cannot deliver billing reminder to %s', admin)
-                if hours <= 0 and config['expire_exclude_tg'] and not node.excluded_tg:
+                if hours <= 0 and config['expire_exclude_tg'] and node.host_automation and not node.excluded_tg:
                     if not config['tg_squad_uuid'] or not node.host_uuid:
                         continue
                     hosts = await self.panel.get_all_hosts()

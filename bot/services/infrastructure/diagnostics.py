@@ -25,9 +25,8 @@ CATALOG = [
     ('ru_speed', 'iPerf3 — Россия', 'ru_speed', '', 900),
     ('tlab_speed', 'iPerf3 — дополнительные направления РФ', 'tlab_speed', '', 1200),
     ('yabs', 'YABS — сервер и международная сеть', 'yabs', '-4', 1800),
-    ('ipcheck', 'IP Check — сервисы', 'ipcheck', '-E -n -p', 900),
+    ('ipcheck', 'IP Check — сервисы и качество IP', 'ipcheck', '-E -n -p', 900),
     ('bench', 'Система и скорость', 'bench', '', 1200),
-    ('ipquality', 'Качество IP', 'ipcheck', '-E -n -p', 900),
     ('cpu', 'sysbench CPU', None, 'sysbench cpu --threads=2 --time=15 run', 60),
 ]
 # Additional checks use packaged tools; no downloaded scripts/images or report uploads.
@@ -41,6 +40,17 @@ EXTRA = [
     ('bufferbloat', 'Задержка под нагрузкой', None, 'ping -c 25 -i 0.5 1.1.1.1 & p=$!; iperf3 -c ping.online.net -t 10; wait "$p"', 40),
     ('memory', 'Память — производительность', None, 'sysbench memory --time=15 --memory-total-size=100G run', 45),
 ]
+
+
+# Identity/availability facts are captured once per job. Only measurements whose
+# variability matters repeat; failed static checks stay explicit in the report.
+ONCE_PER_JOB = frozenset({'ipregion', 'geo', 'dpi', 'tlab_censor', 'ipcheck', 'ipquality', 'ipv6'})
+
+
+def diagnostic_plan(level, repeats=1):
+    catalog = CATALOG + (EXTRA if level == 'large' else [])
+    return [(iteration, test) for iteration in range(1, (repeats if level == 'large' else 1) + 1)
+            for test in catalog if iteration == 1 or test[0] not in ONCE_PER_JOB]
 
 
 def privacy_patch(name, content):
@@ -106,7 +116,7 @@ async def quick_check(service, deployment, node):
                     error = 'Нода не слушает порты 443 и 2222'
                 else:
                     data = await service.api.call('GET', f'/nodes/{node.panel_uuid}')
-                    if data.get('address') and validate_address(data['address']) != validate_address(deployment.address):
+                    if data.get('address') and validate_address(data['address']) != validate_address(getattr(deployment, 'panel_address', None) or deployment.address):
                         error = 'Адрес ноды в панели не совпадает с проверяемым VPS'
                     elif data.get('isConnected'):
                         try:
@@ -196,10 +206,10 @@ async def run_diagnostics(service, job, node, deployment, config):
             raise RuntimeError(output)
         return
     else:
-        catalog = CATALOG + (EXTRA if job.kind == 'large' else [])
         repeats = config['large_repeats'] if job.kind == 'large' else 1
+        plan = diagnostic_plan(job.kind, repeats)
         if all(any(r.get('id') == test[0] and r.get('round') == iteration for r in results)
-               for iteration in range(1, repeats + 1) for test in catalog):
+               for iteration, test in plan):
             # Rendering interrupted after the last measurement must not require
             # the VPS, package repositories or upstream scripts to remain online.
             await finalize_report(service, job, node, deployment, directory, results)
@@ -217,52 +227,52 @@ async def run_diagnostics(service, job, node, deployment, config):
                 async with connection.start_sftp_client() as sftp:
                     for name, path in paths.items():
                         await sftp.put(str(path), f'{remote}/{name}.sh')
-                for iteration in range(1, repeats + 1):
-                    for test_id, title, script, command, timeout in catalog:
-                        if any(r.get('id') == test_id and r.get('round') == iteration for r in results):
-                            continue
-                        await stage(service, job.id, f'{iteration}/{repeats}: {test_id}')
-                        actual = f'bash {remote}/{script}.sh {command}' if script else command
-                        # Every process group is isolated and bounded. Cancellation
-                        # kills the process group, not just the SSH channel.
-                        await connection.run(f'rm -f {remote}/exit.txt', timeout=10)
-                        script_command = f'cd {remote}; export LC_ALL=C.UTF-8 TERM=xterm-256color CLICOLOR_FORCE=1 FORCE_COLOR=1; unset NO_COLOR; timeout --kill-after=10 {timeout} bash -c {shlex.quote(actual)}; echo $? > {remote}/exit.txt'
-                        wrapped = f'setsid bash -c {shlex.quote(script_command)} > {remote}/out.txt 2>&1 < /dev/null & echo $!'
-                        started = await connection.run(wrapped, timeout=15)
-                        pid = started.stdout.strip()
-                        if not pid.isdigit():
-                            raise RuntimeError('Не удалось запустить диагностический процесс')
-                        began = time.monotonic()
-                        try:
-                            while True:
-                                alive = await connection.run(f'test -f {remote}/exit.txt', timeout=10)
-                                if alive.exit_status == 0:
-                                    break
-                                if time.monotonic() - began > timeout + 20:
-                                    await connection.run(f'kill -- -{pid} 2>/dev/null || true', timeout=10)
-                                    break
-                                await asyncio.sleep(2)
-                        except BaseException:
-                            try:
+                for iteration, test in plan:
+                    test_id, title, script, command, timeout = test
+                    if any(r.get('id') == test_id and r.get('round') == iteration for r in results):
+                        continue
+                    await stage(service, job.id, f'{iteration}/{repeats}: {test_id}')
+                    actual = f'bash {remote}/{script}.sh {command}' if script else command
+                    # Every process group is isolated and bounded. Cancellation
+                    # kills the process group, not just the SSH channel.
+                    await connection.run(f'rm -f {remote}/exit.txt', timeout=10)
+                    script_command = f'cd {remote}; export LC_ALL=C.UTF-8 TERM=xterm-256color CLICOLOR_FORCE=1 FORCE_COLOR=1; unset NO_COLOR; timeout --kill-after=10 {timeout} bash -c {shlex.quote(actual)}; echo $? > {remote}/exit.txt'
+                    wrapped = f'setsid bash -c {shlex.quote(script_command)} > {remote}/out.txt 2>&1 < /dev/null & echo $!'
+                    started = await connection.run(wrapped, timeout=15)
+                    pid = started.stdout.strip()
+                    if not pid.isdigit():
+                        raise RuntimeError('Не удалось запустить диагностический процесс')
+                    began = time.monotonic()
+                    try:
+                        while True:
+                            alive = await connection.run(f'test -f {remote}/exit.txt', timeout=10)
+                            if alive.exit_status == 0:
+                                break
+                            if time.monotonic() - began > timeout + 20:
                                 await connection.run(f'kill -- -{pid} 2>/dev/null || true', timeout=10)
-                            except (asyncssh.Error, OSError, TimeoutError):
-                                pass  # The remote timeout still bounds a disconnected process.
-                            raise
-                        captured = await connection.run(f'head -c 2000000 {remote}/out.txt', timeout=30)
-                        output = clean_output(captured.stdout)
-                        exit_result = await connection.run(f'cat {remote}/exit.txt 2>/dev/null', timeout=10)
-                        outcome = 'ok' if exit_result.stdout.strip() == '0' else ('timeout' if exit_result.stdout.strip() == '124' else 'failed')
-                        result = {'id': test_id, 'title': title, 'round': iteration,
-                                  'status': outcome,
-                                  'seconds': round(time.monotonic() - began, 1),
-                                  'output': output, 'ansi_output': clean_output(captured.stdout, preserve_ansi=True),
-                                  'metrics': measurements(output)}
-                        result['warnings'] = incomplete_checks(test_id, output)
-                        if outcome == 'ok' and result['warnings']:
-                            result['status'] = 'partial'
-                        result['metrics'] = result_measurements(result) or result['metrics']
-                        results.append(result)
-                        (directory / 'results.json').write_text(json.dumps(results, ensure_ascii=False, indent=2))
+                                break
+                            await asyncio.sleep(2)
+                    except BaseException:
+                        try:
+                            await connection.run(f'kill -- -{pid} 2>/dev/null || true', timeout=10)
+                        except (asyncssh.Error, OSError, TimeoutError):
+                            pass  # The remote timeout still bounds a disconnected process.
+                        raise
+                    captured = await connection.run(f'head -c 2000000 {remote}/out.txt', timeout=30)
+                    output = clean_output(captured.stdout)
+                    exit_result = await connection.run(f'cat {remote}/exit.txt 2>/dev/null', timeout=10)
+                    outcome = 'ok' if exit_result.stdout.strip() == '0' else ('timeout' if exit_result.stdout.strip() == '124' else 'failed')
+                    result = {'id': test_id, 'title': title, 'round': iteration,
+                              'status': outcome,
+                              'seconds': round(time.monotonic() - began, 1),
+                              'output': output, 'ansi_output': clean_output(captured.stdout, preserve_ansi=True),
+                              'metrics': measurements(output)}
+                    result['warnings'] = incomplete_checks(test_id, output)
+                    if outcome == 'ok' and result['warnings']:
+                        result['status'] = 'partial'
+                    result['metrics'] = result_measurements(result) or result['metrics']
+                    results.append(result)
+                    (directory / 'results.json').write_text(json.dumps(results, ensure_ascii=False, indent=2))
             finally:
                 await connection.run(f'rm -rf -- {remote}', timeout=30)
     await finalize_report(service, job, node, deployment, directory, results)
@@ -271,13 +281,13 @@ async def run_diagnostics(service, job, node, deployment, config):
 async def finalize_report(service, job, node, deployment, directory, results):
     manifest = {'node': node.name, 'address': deployment.address, 'level': job.kind,
                 'deployment_id': deployment.id, 'created_at': datetime.now(timezone.utc).isoformat(),
-                'results': results, 'catalog_version': 1}
+                'results': results, 'catalog_version': 2}
     (directory / 'results.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
     from .reports import render_reports
     artifacts = await asyncio.to_thread(render_reports, directory, manifest)
     async with service.factory() as session:
         session.add(Report(job_id=job.id, deployment_id=deployment.id, level=job.kind,
-                           manifest=json.dumps({'directory': str(job.id), 'files': artifacts, 'renderer_version': 2})))
+                           manifest=json.dumps({'directory': str(job.id), 'files': artifacts, 'renderer_version': 3})))
         await session.commit()
     await send_artifacts(service, job.requested_by, directory, artifacts, job.kind)
 

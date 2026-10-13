@@ -758,7 +758,7 @@
   "infra_test_history": "📊 История тестов",
   "infra_restart": "🔄 Перезапустить ноду",
   "infra_upgrade": "⬆️ Обновить ПО ноды",
-  "infra_edit_access": "✏️ Редактировать доступ / host",
+  "infra_edit_access": "✏️ Изменить адрес host",
   "infra_change_sni": "🌐 Изменить SNI host",
   "infra_delete": "🗑 Удалить",
   "infra_use_default": "По умолчанию: {p0}",
@@ -805,7 +805,7 @@
   "infra_check_access": "Проверьте порт, root-логин и пароль",
   "infra_credentials_saved": "SSH-доступ сохранён. Отпечаток: <code>{p0}</code>",
   "infra_no_default": "Нет значения по умолчанию",
-  "infra_ambiguous_host": "Для подключения требуется один inbound и однозначно связанный host",
+  "infra_ambiguous_host": "Нет однозначно связанного host. Измените нужный host в панели.",
   "infra_use_replace": "Для нового сервера используйте «Заменить VPS», чтобы сохранить историю",
   "infra_attach_access_first": "Сначала подключите доступ к ноде",
   "infra_inbound_unavailable": "Не удалось получить выбранный inbound для проверки SNI",
@@ -894,5 +894,11 @@
   "infra_ports_not_listening": "Нода не слушает порты 443 и 2222",
   "infra_address_mismatch": "Адрес ноды в панели не совпадает с проверяемым VPS",
   "infra_tcp_unreachable": "TCP 443 недоступен извне",
-  "infra_panel_disconnected": "Панель не подключена к ноде"
+  "infra_panel_disconnected": "Панель не подключена к ноде",
+  "infra_save_access": "🔑 Сохранить SSH-доступ",
+  "infra_ask_ssh_only": "Введите SSH-адрес, порт, логин и пароль: четыре строки. Host и настройки сервера не изменяются.",
+  "infra_ask_host_only": "Введите новый адрес host для клиентов. Это отдельное изменение в панели.",
+  "infra_four_access_lines": "Нужно четыре строки: SSH-адрес, порт, логин, пароль",
+  "infra_wait_access": "Дождитесь завершения заданий перед изменением SSH-доступа",
+  "infra_access_only_mode": "\nПодключена для SSH/диагностики: автоматические изменения host выключены."
 }

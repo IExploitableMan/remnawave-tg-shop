@@ -169,7 +169,8 @@ def render_console_pdf(directory, manifest, aggregates):
 
     for result in report_results(manifest['results']):
         title = f"{result['title']} | {result['status']} | round {result['round']}"
-        rows = console_rows(result.get('ansi_output') or result.get('output') or 'No output')
+        from .report_summary import display_output
+        rows = console_rows(display_output(result))
         # Uniform font size for the whole table preserves column alignment.
         longest = max((sum(len(text) for text, _ in row) for row in rows), default=1)
         size = max(6, min(10, (width - margin * 2) / (max(1, longest) * .603)))
@@ -190,6 +191,10 @@ def render_console_pdf(directory, manifest, aggregates):
                         chunks.append(current); current, length = [], 0
             if current or not chunks:
                 chunks.append(current)
+            offset = 0
+            original_line = ''.join(text for text, _ in spans)
+            from .flags import flag_positions
+            flags = flag_positions(original_line, result.get('id'))
             for chunk in chunks:
                 if y < bottom:
                     y = new_page(title + ' (continued)')
@@ -206,6 +211,12 @@ def render_console_pdf(directory, manifest, aggregates):
                     if style.underline:
                         pdf.setStrokeColor(HexColor(style.foreground));pdf.line(x, y - 1, x + span_width, y - 1)
                     x += span_width
+                for column, path in flags:
+                    local = column - offset
+                    if 0 <= local < columns:
+                        pdf.drawImage(str(path), margin + (local-2.6)*cell, y-size*.15,
+                            width=cell*2, height=cell*1.5, mask='auto')
+                offset += sum(len(text) for text, _ in chunk)
                 y -= leading
     if aggregates:
         y = new_page('Repeated measurements: min / median / max')

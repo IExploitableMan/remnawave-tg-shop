@@ -198,3 +198,30 @@ first, and failures/busy/N/A/rate limits are retained.
 
 The correction checklist and local validation are in
 [infrastructure-fixes-plan.md](infrastructure-fixes-plan.md).
+
+## Approved SSH-only import and report polish
+
+An existing panel node can be attached and have its SSH address/port/root password
+verified and stored separately from client-host editing. This does not install
+software, create hosts, patch panel settings or queue a key update. Hosts/inbounds
+may be ambiguous or absent; SSH-only records allow unknown inbound bindings.
+Imported nodes are excluded from automatic host expiry changes, including when
+the global expiry setting is enabled. Nodes created through provisioning retain
+that behavior. Explicit host editing/renewal/replacement remain separate actions.
+Migration 0015 identifies existing imported nodes by the absence of provisioning
+job history and stores the captured panel address separately from SSH address.
+
+Each job captures IP region, geoblocking, DPI, service availability, IP Check and
+IPv6 availability once. Network/CPU/disk/memory performance, DNS/CDN delays, route,
+UDP and sustained measurements repeat according to the configured pass count.
+IP Check already contains service and IP-quality information, so its duplicate
+invocation was removed. The catalog now has 10 unique medium checks and 18 large
+checks: three large passes schedule 42 checks instead of repeating all facts.
+Saved completed outcomes are reused when resuming; raw historical data are kept.
+
+The PDF uses compact UDP summaries (sender/receiver, measured speed/time, packet
+loss, jitter, errors), sustained interval tables, and DNS/CDN summaries. Plain
+console tables retain their layout; upload/download metrics are independent.
+Country icons are local assets placed in existing padding; no CDN is queried at
+render time. Missing values and failures remain explicit. Renderer version 3
+rebuilds older reports from saved output without re-running measurements.

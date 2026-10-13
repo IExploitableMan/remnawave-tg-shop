@@ -757,7 +757,7 @@
   "infra_test_history": "📊 Test history",
   "infra_restart": "🔄 Restart node",
   "infra_upgrade": "⬆️ Update node software",
-  "infra_edit_access": "✏️ Edit access / client address",
+  "infra_edit_access": "✏️ Change host address",
   "infra_change_sni": "🌐 Change host SNI",
   "infra_delete": "🗑 Delete",
   "infra_use_default": "Default: {p0}",
@@ -804,7 +804,7 @@
   "infra_check_access": "Check the port, root username and password",
   "infra_credentials_saved": "SSH access saved. Fingerprint: <code>{p0}</code>",
   "infra_no_default": "No default value is available",
-  "infra_ambiguous_host": "Attaching access requires one inbound and an unambiguously linked host",
+  "infra_ambiguous_host": "No unique host is linked. Edit the required host in the panel.",
   "infra_use_replace": "For a new server use “Replace VPS” to preserve history",
   "infra_attach_access_first": "Attach SSH access to the node first",
   "infra_inbound_unavailable": "Unable to retrieve the selected inbound to validate SNI",
@@ -893,5 +893,11 @@
   "infra_ports_not_listening": "The node is not listening on ports 443 and 2222",
   "infra_address_mismatch": "The panel node address differs from the VPS being checked",
   "infra_tcp_unreachable": "TCP port 443 is not reachable externally",
-  "infra_panel_disconnected": "The panel is not connected to the node"
+  "infra_panel_disconnected": "The panel is not connected to the node",
+  "infra_save_access": "🔑 Save SSH access",
+  "infra_ask_ssh_only": "Enter SSH address, port, username and password on four lines. Host and server settings remain unchanged.",
+  "infra_ask_host_only": "Enter the new client host address. This explicitly changes the host in the panel.",
+  "infra_four_access_lines": "Four lines required: SSH address, port, username, password",
+  "infra_wait_access": "Wait for queued/running jobs to finish before changing SSH access",
+  "infra_access_only_mode": "\nAttached for SSH/diagnostics: automatic host changes are disabled."
 }

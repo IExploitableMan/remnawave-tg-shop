@@ -234,3 +234,57 @@ class InfrastructureDatabaseTests(unittest.IsolatedAsyncioTestCase):
         await self.service.publish_snapshots()
         self.assertEqual(self.bot.edit_message_text.await_count, 2)
         self.bot.send_message.assert_not_called()
+
+    async def test_save_existing_access_ignores_multiple_hosts_inbounds_and_never_patches_panel(self):
+        import asyncssh
+        from unittest.mock import patch, MagicMock
+        node, old = await self.node_fixture()
+        async with self.factory() as session:
+            await session.execute(delete(Deployment).where(Deployment.id == old.id))
+            actual = await session.get(Node, node.id)
+            actual.panel_uuid = str(uuid4())
+            await session.commit()
+        public = asyncssh.generate_private_key('ssh-ed25519').export_public_key().decode().strip()
+        self.service.api.nodes = AsyncMock(return_value=[{'uuid': actual.panel_uuid, 'name': 'existing',
+            'countryCode': 'DE', 'address': 'vpn.example.com', 'configProfile': {
+                'activeConfigProfileUuid': 'profile', 'activeInbounds': ['one', 'two']}}])
+        self.service.api.billing = AsyncMock(return_value={'billingNodes': []})
+        self.service.api.call = AsyncMock()
+        self.service.panel.get_all_hosts = AsyncMock(return_value=[{'uuid': 'one', 'nodes': [actual.panel_uuid]},
+            {'uuid': 'two', 'nodes': [actual.panel_uuid]}])
+        connect = MagicMock()
+        connect.return_value.__aenter__ = AsyncMock()
+        connect.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch('bot.services.infrastructure.provisioning.host_key', new=AsyncMock(return_value=(public, 'fingerprint'))), \
+                patch('asyncssh.connect', connect):
+            async with self.factory() as session:
+                node = await session.get(Node, node.id)
+                dep, fingerprint = await self.service.save_access(session, node, '203.0.113.1', 22, 'root', 'password')
+                await session.commit()
+                self.assertIsNone(dep.inbound_uuid)
+                self.assertIsNone(node.host_uuid)
+                self.assertEqual(dep.panel_address, 'vpn.example.com')
+                self.assertEqual(dep.host_address, 'vpn.example.com')
+                self.assertEqual(self.service.cipher().decrypt(dep.credentials.encode()).decode(), 'password')
+                await self.service.validate_deployment(session, node, dep)
+        self.service.api.call.assert_not_awaited()
+
+    async def test_imported_node_deadline_never_changes_host_automatically(self):
+        from unittest.mock import patch
+        node, deployment = await self.node_fixture()
+        panel_uuid, host_uuid = str(uuid4()), str(uuid4())
+        async with self.factory() as session:
+            stored = await session.get(Node, node.id)
+            stored.panel_uuid, stored.host_uuid, stored.host_automation = panel_uuid, host_uuid, False
+            await session.commit()
+        self.service.api.billing = AsyncMock(return_value={'billingNodes': [{'uuid': str(uuid4()),
+            'nodeUuid': panel_uuid, 'providerUuid': node.provider_uuid,
+            'nextBillingAt': (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()}]})
+        self.service.api.providers = AsyncMock(return_value=[])
+        self.service.api.call = AsyncMock()
+        self.service.panel.get_all_hosts = AsyncMock()
+        with patch('bot.services.infrastructure.service.read_config', new=AsyncMock(return_value={
+                'warning_hours': [], 'expire_exclude_tg': True, 'tg_squad_uuid': 'tg'})):
+            await self.service.check_billing()
+        self.service.api.call.assert_not_awaited()
+        self.service.panel.get_all_hosts.assert_not_awaited()

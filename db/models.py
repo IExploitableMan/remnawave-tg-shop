@@ -440,6 +440,7 @@ class InfrastructureNode(Base):
     name = Column(String(30), nullable=False)
     country = Column(String(2), nullable=False)
     provider_uuid = Column(String(36), nullable=False)
+    host_automation = Column(Boolean, nullable=False, default=True, server_default='true')
     period_days = Column(Integer, nullable=False, default=30)
     billing_uuid = Column(String(36), nullable=True)
     excluded_tg = Column(Boolean, nullable=False, default=False)
@@ -460,8 +461,9 @@ class InfrastructureDeployment(Base):
     ssh_user = Column(String(64), nullable=False, default='root')
     credentials = Column(Text, nullable=False)  # Fernet ciphertext, never FSM/job JSON
     host_public_key = Column(Text, nullable=True)
-    profile_uuid = Column(String(36), nullable=False)
-    inbound_uuid = Column(String(36), nullable=False)
+    panel_address = Column(String(255), nullable=True)  # panel address when SSH access was verified
+    profile_uuid = Column(String(36), nullable=True)
+    inbound_uuid = Column(String(36), nullable=True)
     sni = Column(String(255), nullable=True)
     node_version = Column(String(32), nullable=False)
     paid_until = Column(DateTime(timezone=True), nullable=True)

@@ -59,18 +59,20 @@ def summary_pages(directory, manifest, result, index, title_font, label_font):
                 for number, line in enumerate(name_lines):
                     draw.text((x+12,y+14+number*23), fit_text(draw,line,small,156), font=small, fill=ink)
                 value = row['value'] or 'N/A'
-                draw.text((x+12,y+76), fit_text(draw,value,label_font,156), font=label_font, fill=ink)
+                from .flags import draw_value, flag_path, CODE
+                flagged = sum(bool(flag_path(m[1] or m[2])) for m in CODE.finditer(value))
+                draw_value(canvas, draw, (x+12,y+76), fit_text(draw,value,label_font,max(40, 156-29*flagged)), label_font, ink)
         elif section == 'bars':
-            maximum = max((b['value'] for b in data['bars']), default=1) or 1
+            maximum = max((v for b in data['bars'] for v in (b['value'], b['upload']) if v is not None), default=1) or 1
             for offset, row in enumerate(rows):
                 x,y = 62+(offset%2)*576, top+(offset//2)*64
                 draw.text((x,y), fit_text(draw,row['label'],small,310), font=small, fill='#eeeeee')
-                value = f"↓ {row['value']:.1f}"
-                if row['upload'] is not None:
-                    value += f"  ↑ {row['upload']:.1f}"
+                down = f"{row['value']:.1f}" if row['value'] is not None else row.get('download_status', 'N/A')
+                up = f"{row['upload']:.1f}" if row['upload'] is not None else row.get('upload_status', 'N/A')
+                value = f'↓ {down}  ↑ {up}'
                 draw.text((x+330,y), value, font=small, fill='#aaaaaa')
                 draw.rectangle((x,y+33,x+550,y+38), fill='#303030')
-                draw.rectangle((x,y+33,x+max(1,int(550*row['value']/maximum)),y+38), fill='#dddddd')
+                draw.rectangle((x,y+33,x+max(1,int(550*(row['value'] if row['value'] is not None else (row['upload'] or 0))/maximum)),y+38), fill='#dddddd')
         filename = f'{index:02d}-{page:02d}.png'
         canvas.save(directory/filename)
         files.append(filename)

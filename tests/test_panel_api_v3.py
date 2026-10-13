@@ -38,6 +38,32 @@ class PanelV3Tests(unittest.IsolatedAsyncioTestCase):
             await service.reset_user_traffic('unknown-legacy-uuid')
         service._request.assert_not_called()
 
+    async def test_identity_recovery_after_unavailable_panel_at_startup(self):
+        from uuid import uuid4
+        service = self.service()
+        reference = str(uuid4())
+
+        async def synchronize():
+            service.identities.by_reference[reference] = 42
+            service.identities.by_id[42] = reference
+            return 1
+
+        service.initialize_identities = AsyncMock(side_effect=synchronize)
+        service._request.return_value = {'status': 'success', 'code': 204}
+        self.assertTrue(await service.reset_user_traffic(reference))
+        self.assertEqual(service._request.call_args.args, ('POST', '/users/42/actions/reset-traffic'))
+        self.assertTrue(await service.reset_user_traffic(reference))
+        service.initialize_identities.assert_awaited_once()
+
+    async def test_valid_unknown_uuid_is_read_checked_without_mutation(self):
+        from uuid import uuid4
+        service = self.service()
+        service._request.return_value = {'response': {'users': [], 'total': 0}}
+        with self.assertRaises(ValueError):
+            await service.reset_user_traffic(str(uuid4()))
+        self.assertTrue(service._request.called)
+        self.assertTrue(all(call.args[0] == 'GET' for call in service._request.call_args_list))
+
     async def test_hwid_uses_numeric_id_and_empty_success(self):
         service = self.service()
         user = await service.normalize_user({'id': 42})

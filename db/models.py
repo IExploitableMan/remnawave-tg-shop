@@ -464,7 +464,7 @@ class InfrastructureDeployment(Base):
     inbound_uuid = Column(String(36), nullable=False)
     sni = Column(String(255), nullable=True)
     node_version = Column(String(32), nullable=False)
-    paid_until = Column(DateTime(timezone=True), nullable=False)
+    paid_until = Column(DateTime(timezone=True), nullable=True)
     state = Column(String(32), nullable=False, default='pending')
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

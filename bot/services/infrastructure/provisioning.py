@@ -1,6 +1,5 @@
 import asyncio
 import copy
-import fnmatch
 import json
 import os
 import signal
@@ -96,8 +95,7 @@ async def provision(service, node, deployment, config, job_id):
     if isinstance(raw, str):
         raw = json.loads(raw)
     reality = (raw.get('streamSettings') or {}).get('realitySettings')
-    if deployment.sni and reality and not any(fnmatch.fnmatchcase(deployment.sni, name)
-                                             for name in reality.get('serverNames', [])):
+    if deployment.sni and reality and deployment.sni not in reality.get('serverNames', []):
         # Never rewrite the common profile or add inbounds to every squad.
         raise ValueError('SNI отсутствует в serverNames выбранного REALITY inbound. Добавьте допустимые SNI в профиль.')
     await stage(service, job_id, 'ansible')
@@ -124,17 +122,13 @@ async def provision(service, node, deployment, config, job_id):
         async with service.factory() as session:
             row = await session.get(Node, node.id); row.panel_uuid = node.panel_uuid
             await session.commit()
-    else:
-        await api.patch_node(node.panel_uuid, values)
     try:
+        if old_node:
+            await api.patch_node(node.panel_uuid, values)
+            await api.restart_node(node.panel_uuid, force=True)
         await stage(service, job_id, 'connection_check')
-        for attempt in range(30):
-            data = await api.call('GET', f'/nodes/{node.panel_uuid}')
-            if data.get('isConnected') and not data.get('isConnecting'):
-                break
-            await asyncio.sleep(2)
-        else:
-            raise RuntimeError('Панель не подключилась к новой ноде за 60 секунд')
+        from .diagnostics import quick_check
+        await quick_check(service, deployment, node)
         await stage(service, job_id, 'host')
         hosts = await service.panel.get_all_hosts()
         if hosts is None:
@@ -158,18 +152,21 @@ async def provision(service, node, deployment, config, job_id):
             await api.call('PATCH', '/hosts', dict(values, uuid=node.host_uuid))
         # A failed post-switch check rolls addresses back. No root password or
         # server wipe is involved in this compensation.
-        from .diagnostics import quick_check
         await quick_check(service, deployment, node)
     except BaseException:
-        if old_node:
-            rollback = {k: old_node[k] for k in ['address', 'port', 'countryCode', 'providerUuid'] if k in old_node}
-            cp = old_node.get('configProfile') or {}
-            rollback['configProfile'] = {'activeConfigProfileUuid': cp.get('activeConfigProfileUuid'),
-                'activeInbounds': [i['uuid'] if isinstance(i, dict) else i for i in cp.get('activeInbounds', [])]}
-            await api.patch_node(node.panel_uuid, rollback)
-        if 'old_host' in locals() and old_host:
-            rollback_host = {k: old_host[k] for k in ['address', 'port', 'nodes', 'inbound', 'sni'] if k in old_host}
-            await api.call('PATCH', '/hosts', dict(rollback_host, uuid=node.host_uuid))
+        try:
+            if old_node:
+                rollback = {k: old_node[k] for k in ['address', 'port', 'countryCode', 'providerUuid'] if k in old_node}
+                cp = old_node.get('configProfile') or {}
+                rollback['configProfile'] = {'activeConfigProfileUuid': cp.get('activeConfigProfileUuid'),
+                    'activeInbounds': [i['uuid'] if isinstance(i, dict) else i for i in cp.get('activeInbounds', [])]}
+                await api.patch_node(node.panel_uuid, rollback)
+                await api.restart_node(node.panel_uuid, force=True)
+        finally:
+            # Attempt host restoration even when the management restart fails.
+            if 'old_host' in locals() and old_host:
+                rollback_host = {k: old_host[k] for k in ['address', 'port', 'nodes', 'inbound', 'sni'] if k in old_host}
+                await api.call('PATCH', '/hosts', dict(rollback_host, uuid=node.host_uuid))
         raise
     # Once traffic has switched, persist the matching credentials immediately.
     # Billing API failure must not leave the card pointing at the old VPS.
@@ -235,7 +232,7 @@ async def run_job(service, job_id):
                 (await changed.get(Deployment, deployment.id)).node_version = deployment.node_version
                 await changed.commit()
         elif job.kind == 'restart':
-            await service.api.call('POST', f'/nodes/{node.panel_uuid}/actions/restart')
+            await service.api.restart_node(node.panel_uuid)
         elif job.kind in {'small', 'medium', 'large'}:
             from .diagnostics import run_diagnostics
             await run_diagnostics(service, job, node, deployment, config)

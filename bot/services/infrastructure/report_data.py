@@ -25,7 +25,7 @@ def service_status(value):
 def parse_result(result):
     output = result['output']
     kind = result.get('id', '')
-    facts, services, bars = [], [], []
+    facts, services, bars, disk = [], [], [], []
     lines = output.splitlines()
     families, family = [], ''
     for line in lines:
@@ -44,6 +44,44 @@ def parse_result(result):
         if match and match[1].strip() in keys:
             label = keys[match[1].strip()]
             facts.append((f'{label} {families[offset]}'.strip(), match[2]))
+    if kind == 'yabs':
+        blocks, disk_values = [], {}
+        for line in lines:
+            row = columns(line)
+            if row and row[0] in ('Single Core', 'Multi Core') and len(row) > 1:
+                facts.append((keys[row[0]], row[1]))
+            if row and row[0] == 'Block Size':
+                blocks = [cell.split()[0] for cell in row[1:]]
+            elif row and row[0] in ('Read', 'Write') and blocks:
+                for block, cell in zip(blocks, row[1:]):
+                    speed = re.search(r'([0-9.]+)\s*([KMG]B/s)', cell)
+                    if speed:
+                        value = float(speed[1]) * {'KB/s': 0.001, 'MB/s': 1, 'GB/s': 1000}[speed[2]]
+                        disk_values.setdefault(block, {})[row[0].lower()] = value
+            elif 'Network Speed Tests' in line:
+                blocks = []
+        disk = [{'label': block, **values} for block, values in disk_values.items()]
+        for row in disk:
+            if row['label'] in ('4k', '1m') and 'read' in row and 'write' in row:
+                facts.append((f"fio {row['label']} R/W", f"{row['read']:g}/{row['write']:g} MB/s"))
+    if kind in ('udp', 'sustained'):
+        try:
+            raw = json.loads(output)
+            if isinstance(raw, dict):
+                if raw.get('error'):
+                    facts.append(('Ошибка измерения', str(raw['error'])))
+                end = raw.get('end') or {}
+                for key, label in (('sum_sent', 'Передано'), ('sum_received', 'Принято'), ('sum', 'Итого')):
+                    values = end.get(key) or {}
+                    for field, suffix, unit, scale in (
+                            ('bits_per_second', '', 'Mbps', 1000000),
+                            ('lost_percent', 'потери', '%', 1),
+                            ('jitter_ms', 'jitter', 'ms', 1)):
+                        value = values.get(field)
+                        if isinstance(value, (int, float)):
+                            facts.append((f'{label} {suffix}'.strip(), f'{value / scale:.2f} {unit}'))
+        except (ValueError, TypeError):
+            pass
     if kind == 'ipregion':
         for line in lines:
             if line.strip() == 'Legend':
@@ -127,7 +165,7 @@ def parse_result(result):
                          'unit': 'Mbps', 'upload': upload})
         if bars:
             facts += [('Макс ↓', f"{max(b['value'] for b in bars):.1f} Mbps"), ('Направлений', str(len(bars)))]
-    return {'facts': list(dict.fromkeys(facts)), 'services': services, 'bars': bars}
+    return {'facts': list(dict.fromkeys(facts)), 'services': services, 'bars': bars, 'disk': disk}
 
 
 def result_measurements(result):
@@ -142,6 +180,24 @@ def result_measurements(result):
             number = re.search(r'\d+(?:\.\d+)?', value)
             if number:
                 metrics[label] = float(number[0])
+    for row in data['disk']:
+        for direction in ('read', 'write'):
+            if direction in row:
+                metrics[f"fio {row['label']} {direction} [MB/s]"] = row[direction]
+    if result.get('id') == 'cdn':
+        for line in result['output'].splitlines():
+            values = dict(re.findall(r'(connect|tls|ttfb)=([0-9.]+)', line))
+            if values and float(values.get('ttfb', 0)) > 0:
+                for label, number in values.items():
+                    metrics[f'{line.split()[0]} {label} [ms]'] = float(number) * 1000
+    if result.get('id') == 'dns':
+        resolver = None
+        for line in result['output'].splitlines():
+            if line.strip() in ('1.1.1.1', '8.8.8.8', '9.9.9.9'):
+                resolver = line.strip()
+            query = re.search(r'Query time:\s*(\d+)\s*msec', line)
+            if resolver and query:
+                metrics[f'{resolver} query [ms]'] = float(query[1])
     if result.get('id') in ('udp', 'sustained'):
         try:
             raw = json.loads(result['output'])

@@ -34,6 +34,9 @@ Adding a public administrator key queues durable propagation to managed servers,
 including servers currently busy with another job; existing
 panel nodes first need their SSH credentials attached. Other authorized keys are
 preserved.
+Attaching SSH credentials does not require an Infra Billing record. An unknown
+paid-until date remains unknown; a later panel billing link is discovered from
+the panel node UUID. Migration `0013_infra_unknown_deadline` permits that state.
 
 The two editable SNI pools are independent of the common profile. A chosen SNI
 must be allowed by the selected REALITY inbound; unsupported values fail before
@@ -63,6 +66,7 @@ Automatic tg exclusion is optional. It changes only that host's access; it does
 not stop the remote container or guarantee immediate disconnection of clients with
 cached configurations. Restoring access uses the saved previous restrictions.
 Manual delete removes selected panel objects, retaining local diagnostic history.
+Archived node reports remain accessible through the read-only archive menu.
 
 ## Diagnostics
 
@@ -70,7 +74,8 @@ Manual delete removes selected panel objects, retaining local diagnostic history
   check does not assert a complete authenticated VPN session.
 - Medium: the full one-pass diagnostic catalog, image pages sent through Telegram.
 - Large: the medium catalog plus stability/UDP/IPv6/DNS/route/CDN/memory checks,
-  repeated measurements and a PDF. Default repetitions: three.
+  a PDF and configurable repeated measurements. Default repetitions: one.
+  Extra passes compare variable network performance; they are optional.
 
 Diagnostic sources are pinned by SHA-256 in `infra/diagnostics/scripts.json`.
 Changed upstream content fails verification and must be reviewed before updating
@@ -85,6 +90,8 @@ are local, persistent and retrievable through the node card. Interrupted partial
 output stays local and manual retry resumes completed checks for the same deployment
 and diagnostic level; completed reports have a database history entry. Automated
 report retention and deletion of historical secrets are not yet implemented.
+If all measurements are saved, retry only renders/delivers the report and does not
+connect to the VPS or download scripts again.
 
 ## Local verification
 
@@ -101,7 +108,8 @@ Do not apply production migrations or install remote servers as part of local te
 
 ## Acceptance evidence
 
-- 89 local unit/database tests pass. Alembic upgrade and Ansible syntax check pass.
+- All 106 local unit/database tests, Alembic upgrade and Ansible syntax checks pass.
+  Embedded migrations preserve application and aiogram logging configuration.
 - Actual panel 2.8.1 scenarios passed: base/add-on purchase and extension, status,
   traffic reset, Telegram lookup, accessible nodes and device listing.
 - The same panel database was restored and migrated to 3.4.5. The same scenarios
@@ -110,19 +118,33 @@ Do not apply production migrations or install remote servers as part of local te
 - Clean Debian 13 VPS installation passed with node 2.8.0, root password and key,
   BBR/FQ and restricted management port. Actual Infra Billing extension, optional
   expense, expiry exclusion and restoration passed on panel 2.8.1.
-- Nine medium diagnostic steps completed on the real VPS; their checkpoint is
-  retained. Image layouts were reviewed against actual output.
+- The medium diagnostic suite completed all eleven steps, reusing nine completed
+  checks after interruption. Saved image layouts were reviewed against real output.
 - A clean replacement panel host received Docker and the same restored database.
   Its 19 pending panel migrations were applied explicitly, the API harness passed
   against panel 3.4.5, and the migrated node reported `isConnected=true`.
 - The existing real node was upgraded to 3.4.2. Its upgrade job now waits for
   container startup, management-port readiness, panel connection and external
   TCP 443 before marking verification complete.
+- Replacement on Ubuntu 24.04 passed: the existing panel node, host and billing
+  UUIDs remained unchanged. Root password, automation key, additional administrator
+  key, BBR/FQ and management-port firewall checks passed.
+- Actual v3 Infra Billing extension, optional expense, expiry exclusion and access
+  restoration passed. Disposable manual deletion removed only the selected objects.
+- An authenticated external VLESS/REALITY session confirmed the new VPS exit IP.
+  The acceptance profile's original Microsoft target caused handshake failure;
+  changing only the test target/SNI to Cloudflare fixed it. A related upstream
+  report is [Xray-core issue 6356](https://github.com/XTLS/Xray-core/issues/6356).
+  Application code never rewrites a shared profile to fix a chosen host SNI.
+- Twenty-nine synthetic Telegram updates exercised the actual handlers/FSM against
+  the remote panel, including settings, provider/SNI/key menus, encrypted wizard,
+  credential authorization and archived-node history.
+- Large diagnostics on the 1 CPU / 1 GB / 10 GB replacement VPS completed two
+  passes, with 38 saved outcomes and a 48-page PDF delivered through Telegram.
+  There were 29 complete, six partial and three failed outcomes; unavailable
+  endpoints and missing Geekbench scores remain explicit instead of becoming
+  zero-speed measurements. Default repetitions are now one.
 
-## Pending acceptance
-
-- Replace the VPS while preserving panel node and host UUIDs; check Ubuntu 24.04
-  provisioning and key propagation.
-- Run repeated large diagnostics and inspect the saved PDF.
-- An authenticated VPN session from outside the test server (currently failing).
-- Telegram interaction with the complete updated test bot.
+- The updated test bot runs on the replacement panel server with the restored bot
+  database, automation key and report history. Telegram polling is confirmed;
+  the previous test poller is stopped with automatic restart disabled.

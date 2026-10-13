@@ -44,6 +44,8 @@ async def _settings_keyboard(
                 text=_(title_key),
                 callback_data=f"runtime_settings_section:{section_key}",
             )
+        if getattr(settings, "INFRA_ENABLED", False):
+            builder.button(text="Инфраструктура" if lang == "ru" else "Infrastructure", callback_data="infra:home")
         builder.button(text=_("back_to_admin_panel_button"), callback_data="admin_action:main")
         builder.adjust(1)
         return builder.as_markup()

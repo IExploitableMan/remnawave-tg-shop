@@ -27,6 +27,7 @@ class PanelApiService:
         self.identities = PanelIdentityService(self.base_url or '', session_factory)
         self._api_major = None
         self._version_lock = asyncio.Lock()
+        self._identity_refresh_lock = asyncio.Lock()
 
     async def api_major(self):
         if self._api_major is not None:
@@ -54,7 +55,20 @@ class PanelApiService:
     async def _user_identifier(self, reference):
         if await self.api_major() == 2:
             return reference
-        return await self.identities.resolve(reference)
+        try:
+            return await self.identities.resolve(reference)
+        except ValueError:
+            from uuid import UUID
+            UUID(str(reference))  # Reject arbitrary input before fetching identities.
+            async with self._identity_refresh_lock:
+                await self.identities.load()
+                try:
+                    return await self.identities.resolve(reference)
+                except ValueError:
+                    # Startup synchronization may have failed while the panel
+                    # was unavailable. Recover links on the next real operation.
+                    await self.initialize_identities()
+                    return await self.identities.resolve(reference)
 
     async def normalize_user(self, data):
         return await self.identities.normalize(data)

@@ -46,9 +46,9 @@ class InfrastructureService:
         return (await session.execute(select(Node).where(
             Node.panel_scope == self.scope, Node.deleted.is_(False)).order_by(Node.id))).scalars().all()
 
-    async def node(self, session, node_id):
+    async def node(self, session, node_id, include_deleted=False):
         node = await session.get(Node, int(node_id))
-        if not node or node.panel_scope != self.scope or node.deleted:
+        if not node or node.panel_scope != self.scope or (node.deleted and not include_deleted):
             raise ValueError('Нода не найдена')
         return node
 
@@ -174,17 +174,32 @@ class InfrastructureService:
                 node.provider_uuid = entry['providerUuid']
         return node
 
+    async def billing_entry(self, session, node, billing=None):
+        billing = billing if billing is not None else await self.api.billing()
+        entries = (billing or {}).get('billingNodes', [])
+
+        def linked_node(entry):
+            return entry.get('nodeUuid') or (entry.get('node') or {}).get('uuid')
+
+        entry = next((e for e in entries if node.billing_uuid and node.panel_uuid
+                      and e['uuid'] == node.billing_uuid and linked_node(e) == node.panel_uuid), None)
+        if not entry and node.panel_uuid:
+            entry = next((e for e in entries if linked_node(e) == node.panel_uuid), None)
+        if entry:
+            node.billing_uuid = entry['uuid']
+            provider = entry.get('providerUuid') or (entry.get('provider') or {}).get('uuid')
+            if provider:
+                node.provider_uuid = provider
+        return entry
+
     async def extend(self, session, node, days, amount=None):
         if amount is not None and (not 0 <= amount <= 100000000):
             raise ValueError('Некорректная сумма')
         if not 1 <= days <= 3650:
             raise ValueError('Срок: от 1 до 3650 дней')
-        if not node.billing_uuid:
-            raise ValueError('Нода ещё не подключена к Infra Billing')
-        billing = await self.api.billing()
-        entry = next((b for b in billing.get('billingNodes', []) if b['uuid'] == node.billing_uuid), None)
+        entry = await self.billing_entry(session, node)
         if not entry:
-            raise ValueError('Запись Infra Billing отсутствует')
+            raise ValueError('Подключите ноду к Infra Billing в панели и укажите срок оплаты')
         old = datetime.fromisoformat(entry['nextBillingAt'].replace('Z', '+00:00'))
         deadline = max(old, utcnow()) + timedelta(days=days)
         await self.api.call('PATCH', '/infra-billing/nodes', {'uuids': [node.billing_uuid], 'nextBillingAt': deadline.isoformat()})
@@ -347,8 +362,9 @@ class InfrastructureService:
                                         except asyncio.CancelledError:
                                             async with self.factory() as stopped:
                                                 row = await stopped.get(Job, job.id)
-                                                row.status = 'interrupted' if asyncio.current_task().cancelling() else 'cancelled'
-                                                await stopped.commit()
+                                                if row.status in {'pending', 'running'}:
+                                                    row.status = 'interrupted' if asyncio.current_task().cancelling() else 'cancelled'
+                                                    await stopped.commit()
                                             if asyncio.current_task().cancelling():
                                                 raise
                                         finally:
@@ -375,10 +391,10 @@ class InfrastructureService:
         self._last_billing_check = time.monotonic()
         async with self.factory() as session:
             config = await read_config(session)
-            entries = {b['uuid']: b for b in (await self.api.billing()).get('billingNodes', [])}
+            billing = await self.api.billing()
             providers = {p['uuid']: p['name'] for p in await self.api.providers()}
             for node in await self.nodes(session):
-                entry = entries.get(node.billing_uuid)
+                entry = await self.billing_entry(session, node, billing)
                 if not entry:
                     continue
                 deadline = datetime.fromisoformat(entry['nextBillingAt'].replace('Z', '+00:00'))

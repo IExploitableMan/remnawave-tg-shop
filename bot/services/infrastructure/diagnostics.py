@@ -15,6 +15,7 @@ import asyncssh
 from aiogram.types import FSInputFile, InputMediaPhoto
 from db.models import InfrastructureReport as Report
 from .provisioning import ssh_arguments, stage
+from .settings import validate_address
 
 CATALOG = [
     ('ipregion', 'IP Region', 'ipregion', '', 600),
@@ -105,7 +106,9 @@ async def quick_check(service, deployment, node):
                     error = 'Нода не слушает порты 443 и 2222'
                 else:
                     data = await service.api.call('GET', f'/nodes/{node.panel_uuid}')
-                    if data.get('isConnected'):
+                    if data.get('address') and validate_address(data['address']) != validate_address(deployment.address):
+                        error = 'Адрес ноды в панели не совпадает с проверяемым VPS'
+                    elif data.get('isConnected'):
                         try:
                             reader, writer = await asyncio.wait_for(asyncio.open_connection(deployment.host_address, 443), 15)
                             writer.close(); await writer.wait_closed()
@@ -150,9 +153,14 @@ def incomplete_checks(test_id, output):
         'ipregion': r'[^\n]*(?:Missing dependencies|IP address is not available)[^\n]*',
         'geo': r'[^\n]*Missing dependencies[^\n]*',
         'dpi': r'[^\n]*Missing dependencies[^\n]*',
+        'ru_speed': r'[^\n]*\bN/A\b[^\n]*',
+        'tlab_speed': r'[^\n]*(?:\bN/A\b|server[^\n]*busy|connection[^\n]*failed)[^\n]*',
         'bench': r'[^\n]*(?:Failed to download speedtest|Failed to parse results|Test failed)[^\n]*',
     }
-    return re.findall(patterns[test_id], output, re.I) if test_id in patterns else []
+    warnings = re.findall(patterns[test_id], output, re.I) if test_id in patterns else []
+    if test_id == 'yabs' and re.search(r'^\s*(?:Single Core|Multi Core)\s*\|[ \t]*$', output, re.M):
+        warnings.append('Geekbench: численные результаты не получены; исходный вывод сохранён')
+    return warnings
 
 
 def resume_results(directory, deployment_id, level):
@@ -185,6 +193,14 @@ async def run_diagnostics(service, job, node, deployment, config):
         results.append({'title': 'Проверка ноды', 'status': 'ok', 'round': 1,
                         'output': await quick_check(service, deployment, node), 'metrics': {}})
     else:
+        catalog = CATALOG + (EXTRA if job.kind == 'large' else [])
+        repeats = config['large_repeats'] if job.kind == 'large' else 1
+        if all(any(r.get('id') == test[0] and r.get('round') == iteration for r in results)
+               for iteration in range(1, repeats + 1) for test in catalog):
+            # Rendering interrupted after the last measurement must not require
+            # the VPS, package repositories or upstream scripts to remain online.
+            await finalize_report(service, job, node, deployment, directory, results)
+            return
         paths = await scripts(directory)
         password = service.cipher().decrypt(deployment.credentials.encode()).decode()
         remote = f'/tmp/rw-diagnostics-{job.id}'
@@ -198,8 +214,6 @@ async def run_diagnostics(service, job, node, deployment, config):
                 async with connection.start_sftp_client() as sftp:
                     for name, path in paths.items():
                         await sftp.put(str(path), f'{remote}/{name}.sh')
-                catalog = CATALOG + (EXTRA if job.kind == 'large' else [])
-                repeats = config['large_repeats'] if job.kind == 'large' else 1
                 for iteration in range(1, repeats + 1):
                     for test_id, title, script, command, timeout in catalog:
                         if any(r.get('id') == test_id and r.get('round') == iteration for r in results):
@@ -225,8 +239,11 @@ async def run_diagnostics(service, job, node, deployment, config):
                                     await connection.run(f'kill -- -{pid} 2>/dev/null || true', timeout=10)
                                     break
                                 await asyncio.sleep(2)
-                        except asyncio.CancelledError:
-                            await connection.run(f'kill -- -{pid} 2>/dev/null || true', timeout=10)
+                        except BaseException:
+                            try:
+                                await connection.run(f'kill -- -{pid} 2>/dev/null || true', timeout=10)
+                            except (asyncssh.Error, OSError, TimeoutError):
+                                pass  # The remote timeout still bounds a disconnected process.
                             raise
                         captured = await connection.run(f'head -c 2000000 {remote}/out.txt', timeout=30)
                         output = clean_output(captured.stdout)
@@ -244,6 +261,10 @@ async def run_diagnostics(service, job, node, deployment, config):
                         (directory / 'results.json').write_text(json.dumps(results, ensure_ascii=False, indent=2))
             finally:
                 await connection.run(f'rm -rf -- {remote}', timeout=30)
+    await finalize_report(service, job, node, deployment, directory, results)
+
+
+async def finalize_report(service, job, node, deployment, directory, results):
     manifest = {'node': node.name, 'address': deployment.address, 'level': job.kind,
                 'deployment_id': deployment.id, 'created_at': datetime.now(timezone.utc).isoformat(),
                 'results': results, 'catalog_version': 1}

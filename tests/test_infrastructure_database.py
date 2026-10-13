@@ -17,6 +17,24 @@ from bot.services.infrastructure.service import InfrastructureService
 
 @unittest.skipUnless(os.environ.get('TEST_DATABASE_URL'), 'Dedicated TEST_DATABASE_URL is required')
 class InfrastructureDatabaseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_embedded_migrations_preserve_application_logging(self):
+        import logging
+        from alembic.config import Config
+        from db.alembic_runner import _run_upgrade
+        root = logging.getLogger()
+        dispatcher = logging.getLogger('aiogram.dispatcher')
+        before = root.level, dispatcher.disabled
+        root.setLevel(logging.INFO)
+        dispatcher.disabled = False
+        try:
+            async with self.engine.begin() as connection:
+                await connection.run_sync(_run_upgrade, Config('alembic.ini'))
+            self.assertEqual(root.level, logging.INFO)
+            self.assertFalse(dispatcher.disabled)
+        finally:
+            root.setLevel(before[0])
+            dispatcher.disabled = before[1]
+
     @classmethod
     def setUpClass(cls):
         import subprocess, sys
@@ -112,6 +130,31 @@ class InfrastructureDatabaseTests(unittest.IsolatedAsyncioTestCase):
             jobs = (await session.execute(select(Job).where(Job.node_id == node.id).order_by(Job.id))).scalars().all()
             self.assertEqual([(j.kind, j.requested_by) for j in jobs], [('medium', 111), ('keys', 222)])
 
+    async def test_archived_node_is_readable_for_history_but_not_operations(self):
+        node, deployment = await self.node_fixture()
+        async with self.factory() as session:
+            (await session.get(Node, node.id)).deleted = True
+            await session.commit()
+            with self.assertRaises(ValueError):
+                await self.service.node(session, node.id)
+            archived = await self.service.node(session, node.id, include_deleted=True)
+            self.assertEqual(archived.id, node.id)
+            foreign = InfrastructureService(self.settings, SimpleNamespace(identities=SimpleNamespace(scope='other-panel')),
+                                             self.bot, self.factory)
+            with self.assertRaises(ValueError):
+                await foreign.node(session, node.id, include_deleted=True)
+
+    async def test_credentials_without_billing_do_not_invent_a_deadline(self):
+        node, deployment = await self.node_fixture()
+        async with self.factory() as session:
+            (await session.get(Deployment, deployment.id)).paid_until = None
+            await session.commit()
+        async with self.factory() as session:
+            stored = await self.service.deployment(session, node.id)
+            self.assertIsNone(stored.paid_until)
+            snapshot = await self.service.snapshot(session, node.id)
+            self.assertIn('root-password', snapshot[0])
+
     async def test_failed_upgrade_does_not_report_uninstalled_version(self):
         from unittest.mock import patch
         from bot.services.infrastructure.provisioning import run_job
@@ -127,6 +170,43 @@ class InfrastructureDatabaseTests(unittest.IsolatedAsyncioTestCase):
         async with self.factory() as session:
             self.assertEqual((await session.get(Deployment, deployment.id)).node_version, '2.8.0')
             self.assertEqual((await session.get(Job, job.id)).status, 'failed')
+
+    async def test_shutdown_preserves_job_completed_during_worker_poll(self):
+        import asyncio
+        from unittest.mock import patch
+        node, deployment = await self.node_fixture()
+        async with self.factory() as session:
+            job = await self.service.enqueue(session, node, deployment, 'small', 111)
+            await session.commit()
+        completed, billing_started = asyncio.Event(), asyncio.Event()
+
+        async def finish_job(service, job_id):
+            async with self.factory() as session:
+                row = await session.get(Job, job_id)
+                row.status, row.result = 'done', 'Готово'
+                row.finished_at = datetime.now(timezone.utc)
+                await session.commit()
+            completed.set()
+
+        async def billing_check():
+            await completed.wait()
+            billing_started.set()
+            await asyncio.Event().wait()
+
+        self.service.api.call = AsyncMock(return_value={})
+        self.service.enqueue_pending_keys = AsyncMock()
+        self.service.check_billing = billing_check
+        with patch('bot.services.infrastructure.provisioning.run_job', new=finish_job):
+            worker = asyncio.create_task(self.service.worker())
+            try:
+                await asyncio.wait_for(billing_started.wait(), 5)
+            finally:
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+        async with self.factory() as session:
+            row = await session.get(Job, job.id)
+            self.assertEqual(row.status, 'done')
+            self.assertIsNotNone(row.finished_at)
 
     async def test_snapshot_updates_all_admins_independent_of_opt_out(self):
         await self.node_fixture()

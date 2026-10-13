@@ -1,4 +1,5 @@
 import ipaddress
+import copy
 import json
 import re
 from db.dal import app_settings_dal
@@ -7,7 +8,7 @@ DEFAULTS = {
     'default_days': 30, 'warning_hours': [72, 24], 'expire_exclude_tg': False,
     'profile_uuid': '', 'inbound_uuid': '', 'tg_squad_uuid': '', 'panel_ip': '',
     'node_version_2': '2.8.0', 'node_version_3': '3.4.2',
-    'sni_ru': [], 'sni_other': [], 'ssh_keys': [], 'large_repeats': 3,
+    'sni_ru': [], 'sni_other': [], 'ssh_keys': [], 'large_repeats': 1,
 }
 
 
@@ -29,7 +30,7 @@ def validate_address(value):
 
 async def read_config(session):
     row = await app_settings_dal.get_setting(session, 'infra.config')
-    return dict(DEFAULTS, **(json.loads(row.value) if row else {}))
+    return dict(copy.deepcopy(DEFAULTS), **(json.loads(row.value) if row else {}))
 
 
 async def save_config(session, key, value, admin_id):

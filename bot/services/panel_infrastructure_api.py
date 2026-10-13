@@ -41,6 +41,10 @@ class PanelInfrastructureApi:
             values.pop('note', None)
         return await self.call('PATCH', '/nodes', values)
 
+    async def restart_node(self, uuid, force=False):
+        payload = {'forceRestart': force} if await self.panel.api_major() == 3 else None
+        return await self.call('POST', f'/nodes/{uuid}/actions/restart', payload)
+
     @staticmethod
     def access_for_version(values, major):
         """Translate saved host restrictions when the panel was upgraded."""
@@ -65,7 +69,7 @@ class PanelInfrastructureApi:
             if access['mode'] == 'ALLOW_ONLY':
                 access['squads'] = [s for s in access['squads'] if s != tg_uuid]
                 if not access['squads']:
-                    original['isDisabled'] = host.get('isDisabled', False)
+                    original = {'isDisabled': host.get('isDisabled', False)}
                     return original, {'isDisabled': True}
             elif access['mode'] == 'EXCLUDE':
                 access['squads'] = list(dict.fromkeys(access['squads'] + [tg_uuid]))

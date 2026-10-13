@@ -46,16 +46,18 @@ async def show(callback, content, buttons):
 async def card(callback, service, session, node_id):
     node = await service.node(session, node_id)
     deployment = await service.deployment(session, node.id)
+    entry = await service.billing_entry(session, node)
+    await session.commit()
     text_value = f'<b>{html.escape(node.name)}</b>\nПериод продления: {node.period_days} дней'
     provider = next((p for p in await service.api.providers() if p['uuid'] == node.provider_uuid), None)
     if provider:
         text_value += '\nПровайдер: ' + html.escape(provider['name'])
     if deployment:
         text_value += f'\nАдрес: <code>{html.escape(deployment.address)}</code>\nHost: <code>{html.escape(deployment.host_address)}</code>\nВерсия ноды: {html.escape(deployment.node_version)}'
-    billing = await service.api.billing()
-    entry = next((b for b in billing.get('billingNodes', []) if b['uuid'] == node.billing_uuid), None)
     if entry:
         text_value += f"\nОплачено до: {html.escape(entry['nextBillingAt'])}"
+    else:
+        text_value += '\nСрок оплаты не указан в Infra Billing'
     text_value += '\nДоступ tg: ' + ('исключён автоматикой' if node.excluded_tg else 'без автоматического исключения')
     buttons = [('Продлить', f'infra:extend:{node.id}'), ('Заменить VPS', f'infra:replace:{node.id}'),
                ('SSH-доступ', f'infra:credentials:{node.id}'), ('Диагностика', f'infra:tests:{node.id}'),
@@ -163,7 +165,13 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             await show(callback, '<b>Инфраструктура</b>', [('Ноды', 'infra:nodes'), ('Добавить ноду', 'infra:new'),
                 ('Провайдеры', 'infra:providers'), ('Настройки', 'infra:settings'), ('SSH-ключи', 'infra:keys'),
                 ('Все доступы', 'infra:snapshot'), ('Уведомления', 'infra:notify'), ('Задания', 'infra:jobs'),
+                ('Архив нод и тестов', 'infra:archive'),
                 ('Админ-панель', 'admin_action:main')])
+        elif action == 'archive':
+            nodes = (await session.execute(select(Node).where(Node.panel_scope == service.scope,
+                Node.deleted.is_(True)).order_by(Node.id.desc()))).scalars().all()
+            await show(callback, 'Удалённые ноды — история тестов',
+                [(n.name, f'infra:reports:{n.id}') for n in nodes] + back())
         elif action == 'nodes':
             nodes = await service.nodes(session)
             buttons = [(n.name, f'infra:node:{n.id}') for n in nodes]
@@ -386,7 +394,7 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
                     buttons.append(('Повторить', f'infra:retry:{job.id}'))
                 await show(callback, f'#{job.id}: {job.status}\n{html.escape(job.stage)}\n{html.escape(job.result or "")}', buttons + back())
         elif action == 'reports':
-            node = await service.node(session, argument)
+            node = await service.node(session, argument, include_deleted=True)
             reports = (await session.execute(select(Report, Deployment.address).join(Deployment).where(
                 Deployment.node_id == node.id).order_by(Report.id.desc()).limit(30))).all()
             await show(callback, 'История тестов', [(f'{r.created_at:%d.%m %H:%M} {address} {r.level}', f'infra:report:{r.id}')
@@ -396,7 +404,7 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             if not report:
                 raise ValueError('Отчёт не найден')
             deployment = await session.get(Deployment, report.deployment_id)
-            await service.node(session, deployment.node_id)
+            await service.node(session, deployment.node_id, include_deleted=True)
             manifest = json.loads(report.manifest)
             directory = Path(settings.INFRA_ARTIFACT_DIR) / 'reports' / manifest['directory']
             if action == 'report_raw':
@@ -526,16 +534,13 @@ async def infrastructure_input(message: types.Message, state: FSMContext, sessio
                 inbounds = cp['activeInbounds']
                 if len(inbounds) != 1 or not node.host_uuid:
                     raise ValueError('Для подключения требуется один inbound и однозначно связанный host')
-                billing = await service.api.billing()
-                entry = next((b for b in billing.get('billingNodes', []) if b['uuid'] == node.billing_uuid), None)
-                if not entry:
-                    raise ValueError('Сначала подключите ноду к Infra Billing в панели')
+                entry = await service.billing_entry(session, node)
                 deployment = Deployment(node_id=node.id, state='active', address=address, host_address=host_address,
                     ssh_port=port, ssh_user=user, credentials=service.cipher().encrypt(password.encode()).decode(),
                     host_public_key=public, profile_uuid=cp['activeConfigProfileUuid'],
                     inbound_uuid=inbounds[0]['uuid'] if isinstance(inbounds[0], dict) else inbounds[0],
                     node_version=(panel_node.get('versions') or {}).get('node') or 'unknown',
-                    paid_until=datetime.fromisoformat(entry['nextBillingAt'].replace('Z', '+00:00')))
+                    paid_until=datetime.fromisoformat(entry['nextBillingAt'].replace('Z', '+00:00')) if entry else None)
                 session.add(deployment)
             else:
                 if address != deployment.address:
@@ -555,12 +560,13 @@ async def infrastructure_input(message: types.Message, state: FSMContext, sessio
                 raise ValueError('Сначала подключите доступ к ноде')
             inbounds = await service.panel.get_inbounds_by_profile_uuid(deployment.profile_uuid, refresh=True)
             inbound = next((i for i in inbounds or [] if i['uuid'] == deployment.inbound_uuid), None)
+            if not inbound:
+                raise ValueError('Не удалось получить выбранный inbound для проверки SNI')
             raw = (inbound or {}).get('rawInbound') or {}
             if isinstance(raw, str):
                 raw = json.loads(raw)
             reality = (raw.get('streamSettings') or {}).get('realitySettings')
-            import fnmatch
-            if reality and not any(fnmatch.fnmatchcase(sni, name) for name in reality.get('serverNames', [])):
+            if reality and sni not in reality.get('serverNames', []):
                 raise ValueError('Этот SNI не разрешён выбранным REALITY inbound')
             await service.api.call('PATCH', '/hosts', {'uuid': node.host_uuid, 'sni': sni})
             deployment.sni = sni

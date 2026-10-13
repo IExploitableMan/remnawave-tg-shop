@@ -370,3 +370,60 @@ class InfrastructureDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(saved.inbound_uuid, inbound)
         self.assertNotEqual(defaults['profile_uuid'], profile)
         self.service.panel.get_inbounds_by_profile_uuid.assert_awaited_with(profile, refresh=True)
+
+    async def test_empty_and_obsolete_snapshots_use_each_admin_language(self):
+        from db.dal import app_settings_dal
+        english, fallback = self.user_id, self.user_id - 1
+        self.settings.ADMIN_IDS = [english, fallback]
+        self.settings.DEFAULT_LANGUAGE = 'ru'
+        async with self.factory() as session:
+            (await session.get(User, english)).language_code = 'en'
+            for admin in self.settings.ADMIN_IDS:
+                await app_settings_dal.upsert_setting(session, f'infra.snapshot.{admin}.{self.identity.scope}', '[11, 12]')
+            await session.commit()
+        await self.service.publish_snapshots()
+        messages = {}
+        for call in self.bot.edit_message_text.await_args_list:
+            messages.setdefault(call.kwargs['chat_id'], []).append(call.args[0])
+        self.assertEqual(messages[english], ['No saved SSH access.', 'The access list was updated in the preceding message.'])
+        self.assertEqual(messages[fallback], ['Нет сохранённых доступов.', 'Список доступов обновлён в предыдущем сообщении.'])
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_billing_reminder_and_button_use_recipient_language_and_escape_panel_text(self):
+        from unittest.mock import patch
+        from db.dal import app_settings_dal
+        node, deployment = await self.node_fixture()
+        node.panel_uuid = str(uuid4())
+        english, fallback = self.user_id, self.user_id - 1
+        self.settings.ADMIN_IDS = [english, fallback]
+        self.settings.DEFAULT_LANGUAGE = 'ru'
+        async with self.factory() as session:
+            (await session.get(User, english)).language_code = 'en'
+            stored = await session.get(Node, node.id)
+            stored.name, stored.panel_uuid = 'node100 <RU>', node.panel_uuid
+            await session.commit()
+        self.service.api.providers = AsyncMock(return_value=[{'uuid': node.provider_uuid, 'name': 'Provider <test>'}])
+        for overdue in (False, True):
+            deadline = datetime.now(timezone.utc) + timedelta(hours=-1 if overdue else 2)
+            self.service.api.billing = AsyncMock(return_value={'billingNodes': [{'uuid': str(uuid4()),
+                'nodeUuid': node.panel_uuid, 'node': {'uuid': node.panel_uuid}, 'providerUuid': node.provider_uuid,
+                'nextBillingAt': deadline.isoformat()}]})
+            self.service._last_billing_check = 0
+            self.bot.send_message.reset_mock()
+            with patch('bot.services.infrastructure.service.read_config', new=AsyncMock(return_value={
+                'warning_hours': [24], 'expire_exclude_tg': False})):
+                await self.service.check_billing()
+            messages = {call.args[0]: call for call in self.bot.send_message.await_args_list}
+            self.assertEqual(set(messages), {english, fallback})
+            self.assertIn('payment date has passed' if overdue else 'payment due in', messages[english].args[1])
+            self.assertIn('дата оплаты прошла' if overdue else 'до оплаты', messages[fallback].args[1])
+            for admin in (english, fallback):
+                self.assertIn('node100 &lt;RU&gt;', messages[admin].args[1])
+                self.assertIn('Provider &lt;test&gt;', messages[admin].args[1])
+                self.assertEqual(messages[admin].kwargs['parse_mode'], 'HTML')
+            self.assertEqual(messages[english].kwargs['reply_markup'].inline_keyboard[0][0].text, '🖥 Node')
+            self.assertEqual(messages[fallback].kwargs['reply_markup'].inline_keyboard[0][0].text, '🖥 Нода')
+        async with self.factory() as session:
+            from db.models import AppSetting
+            await session.execute(delete(AppSetting).where(AppSetting.key.like(f'infra.warn.{node.id}.%')))
+            await session.commit()

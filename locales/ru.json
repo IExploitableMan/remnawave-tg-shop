@@ -974,5 +974,10 @@
   "infra_check_bufferbloat": "Задержка под нагрузкой",
   "infra_check_memory": "Память",
   "infra_stage_starting": "Подготовка к выполнению",
-  "infra_status_done_issues": "⚠️ Завершено с замечаниями"
+  "infra_status_done_issues": "⚠️ Завершено с замечаниями",
+  "infra_no_saved_access": "Нет сохранённых доступов.",
+  "infra_snapshot_replaced": "Список доступов обновлён в предыдущем сообщении.",
+  "infra_billing_overdue": "дата оплаты прошла",
+  "infra_billing_remaining": "до оплаты {p0} ч",
+  "infra_billing_reminder": "{p0}: {p1}\nПровайдер: {p2}\n{p3}"
 }

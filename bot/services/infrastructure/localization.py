@@ -43,3 +43,14 @@ async def admin_error(service, admin_id, message):
         if key.startswith('infra_') and value == message:
             return await admin_text(service, admin_id, key)
     return message
+
+
+async def admin_translator(service, session, admin_id=None):
+    """Resolve the recipient once using the caller's existing DB session."""
+    from db.models import User
+    language = getattr(service.settings, 'DEFAULT_LANGUAGE', 'ru')
+    user = await session.get(User, admin_id) if admin_id is not None else None
+    if user and user.language_code:
+        language = user.language_code
+    catalog = get_i18n_instance()
+    return lambda key, **values: catalog.gettext(language, key, **values)

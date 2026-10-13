@@ -973,5 +973,10 @@
   "infra_check_bufferbloat": "Latency under load",
   "infra_check_memory": "Memory",
   "infra_stage_starting": "Preparing to run",
-  "infra_status_done_issues": "⚠️ Completed with issues"
+  "infra_status_done_issues": "⚠️ Completed with issues",
+  "infra_no_saved_access": "No saved SSH access.",
+  "infra_snapshot_replaced": "The access list was updated in the preceding message.",
+  "infra_billing_overdue": "payment date has passed",
+  "infra_billing_remaining": "payment due in {p0}h",
+  "infra_billing_reminder": "{p0}: {p1}\nProvider: {p2}\n{p3}"
 }

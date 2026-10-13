@@ -363,7 +363,7 @@ class InfrastructureService:
                 raise RuntimeError('Не удалось удалить один из объектов; повторите операцию')
         node.deleted = True  # keep deployment/test history
 
-    async def snapshot(self, session, node_id=None):
+    async def snapshot(self, session, node_id=None, admin_id=None):
         nodes = [await self.node(session, node_id)] if node_id else await self.nodes(session)
         sections = []
         for node in nodes:
@@ -385,14 +385,20 @@ class InfrastructureService:
             current += ('\n\n' if current else '') + section
         if current:
             messages.append(current)
-        return messages or ['Нет сохранённых доступов.']
+        if messages:
+            return messages
+        from .localization import admin_translator
+        translate = await admin_translator(self, session, admin_id)
+        return [translate('infra_no_saved_access')]
 
     async def publish_snapshots(self, all_admins=True, admin_id=None):
         async with self._snapshot_lock:
             for recipient in (self.settings.ADMIN_IDS if all_admins else [admin_id]):
                 try:
                     async with self.factory() as session:
-                        texts = await self.snapshot(session)
+                        texts = await self.snapshot(session, admin_id=recipient)
+                        from .localization import admin_translator
+                        translate = await admin_translator(self, session, recipient)
                         key = f'infra.snapshot.{recipient}.{self.scope}'
                         row = await app_settings_dal.get_setting(session, key)
                         previous = json.loads(row.value) if row else []
@@ -410,7 +416,7 @@ class InfrastructureService:
                             ids.append(sent.message_id)
                         for old_id in previous[len(texts):]:
                             try:
-                                await self.bot.edit_message_text('Список доступов обновлён в предыдущем сообщении.',
+                                await self.bot.edit_message_text(translate('infra_snapshot_replaced'),
                                     chat_id=recipient, message_id=old_id)
                             except Exception:
                                 pass
@@ -540,13 +546,16 @@ class InfrastructureService:
                         sent = await app_settings_dal.get_setting(session, marker)
                         if sent and sent.value == deadline.isoformat():
                             continue
-                        message = (f'{html.escape(node.name)}: ' + ('дата оплаты прошла' if hours < 0 else f'до оплаты {max(0, int(hours))} ч') +
-                            f"\nПровайдер: {html.escape(providers.get(node.provider_uuid, '—'))}\n{deadline.strftime('%d.%m.%Y %H:%M UTC')}")
+                        from .localization import admin_translator
+                        translate = await admin_translator(self, session, admin)
+                        timing = translate('infra_billing_overdue') if hours < 0 else translate('infra_billing_remaining', p0=max(0, int(hours)))
+                        message = translate('infra_billing_reminder', p0=html.escape(node.name), p1=timing,
+                            p2=html.escape(providers.get(node.provider_uuid, '—')), p3=deadline.strftime('%d.%m.%Y %H:%M UTC'))
                         try:
                             from aiogram.utils.keyboard import InlineKeyboardBuilder
                             kb = InlineKeyboardBuilder()
-                            kb.button(text='Открыть ноду', callback_data=f'infra:node:{node.id}')
-                            await self.bot.send_message(admin, message, reply_markup=kb.as_markup())
+                            kb.button(text=translate('infra_open_node'), callback_data=f'infra:node:{node.id}')
+                            await self.bot.send_message(admin, message, reply_markup=kb.as_markup(), parse_mode='HTML')
                             await app_settings_dal.upsert_setting(session, marker, deadline.isoformat())
                         except Exception:
                             logging.warning('Cannot deliver billing reminder to %s', admin)

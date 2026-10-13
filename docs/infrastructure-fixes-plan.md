@@ -99,3 +99,26 @@ this avoids assuming every newer node release works with an older panel. Failed
 lookups or unknown installed versions do not expose an upgrade action.
 
 Final checkpoint-count polish: 56 focused infrastructure tests passed, including legacy extra-result handling. The diagnostic catalog is version 3. This changes rendering/progress bookkeeping only; no remote benchmark was run.
+
+## Completion audit gaps found on 2026-10-13
+
+This audit initially found a required localization gap and a low-priority
+snapshot synchronization improvement. The earlier completion declaration was
+too broad. The owner subsequently noted that panel names/countries rarely change.
+
+- [x] Localize background infrastructure billing reminders and the empty/obsolete
+  SSH snapshot messages using each administrator's language.
+- Optional improvement (the owner noted these fields rarely change): refresh every administrator's credential snapshot after a node name/country
+  changes directly in the panel. Current metadata refresh updates local rows but
+  does not trigger snapshot publication. Preserve verified SSH addresses and
+  credentials; never infer new SSH access from a changed panel address.
+
+Localization correction: billing reminders, their action button and empty/obsolete
+SSH snapshot notices now resolve each recipient's DB language independently,
+falling back to the bot default. Tests covered English and Russian recipients,
+upcoming/overdue deadlines, HTML escaping and shrinking snapshot message lists.
+All 58 focused infrastructure tests, syntax/JSON and diff checks passed.
+No quality benchmarks or remote node operations were run for this correction.
+Evidence: `/tmp/infra-localization-tail/`.
+
+The correction was deployed to the authorized @cridpugbot on 154.86.119.144 after an empty-queue check. Polling startup and exact deployed source/locale hashes were verified; production was untouched.

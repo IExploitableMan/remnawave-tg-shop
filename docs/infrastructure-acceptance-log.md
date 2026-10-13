@@ -205,3 +205,18 @@ manual test (old node container stopped, not a clean OS), and 95.182.88.225 rema
 an unused old stand with its containers preserved. WARP/Psiphon is deferred.
 
 Final checkpoint-count polish: 56 focused infrastructure tests passed, including legacy extra-result handling. The diagnostic catalog is version 3. This changes rendering/progress bookkeeping only; no remote benchmark was run.
+
+## Remaining localization correction, 2026-10-13
+
+Billing reminders and their node button, empty SSH snapshots and obsolete
+snapshot messages use each recipient's language, with the bot default as fallback.
+58 focused infrastructure tests passed; new DB-backed tests exercised mixed
+English/Russian recipients, upcoming and overdue payment dates, HTML escaping
+and snapshot list contraction. Syntax/locale/diff checks passed. No remote node
+operation or server-quality benchmark was run.
+
+The owner considers automatic snapshot refresh after panel name/country edits
+low priority; that optional synchronization was not added in this correction.
+Evidence: `/tmp/infra-localization-tail/`.
+
+The correction was deployed to the authorized @cridpugbot on 154.86.119.144 after an empty-queue check. Polling startup and exact deployed source/locale hashes were verified; production was untouched.

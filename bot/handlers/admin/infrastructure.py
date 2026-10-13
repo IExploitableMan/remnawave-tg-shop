@@ -494,7 +494,7 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
         elif action == 'snapshot':
             await service.publish_snapshots(all_admins=False, admin_id=callback.from_user.id)
         elif action == 'credentials':
-            for content in await service.snapshot(session, int(argument)):
+            for content in await service.snapshot(session, int(argument), admin_id=callback.from_user.id):
                 await callback.message.answer(content)
         elif action in {'extend', 'access', 'edit', 'sni'}:
             node = await service.node(session, argument)

@@ -1,4 +1,5 @@
 import asyncio
+import html
 import copy
 import json
 import os
@@ -216,6 +217,15 @@ async def run_job(service, job_id):
         deployment = await session.get(Deployment, job.deployment_id)
         config = await read_config(session)
     try:
+        if job.kind != 'provision':
+            async with service.factory() as changed:
+                live_node = await changed.get(Node, node.id)
+                live_deployment = await changed.get(Deployment, deployment.id)
+                if live_node.deleted or live_deployment.state != 'active':
+                    raise ValueError('Этот VPS уже заменён. Используйте текущую карточку ноды.')
+                await service.validate_deployment(changed, live_node, live_deployment)
+                await changed.commit()
+                node, deployment = live_node, live_deployment
         if job.kind == 'provision':
             await provision(service, node, deployment, config, job_id)
         elif job.kind == 'keys':
@@ -250,6 +260,9 @@ async def run_job(service, job_id):
         row.status, row.result, row.finished_at = status, result[:500], datetime.now(timezone.utc)
         await session.commit()
     try:
-        await service.bot.send_message(job.requested_by, f'Задание #{job_id}: {status}\n{result[:500]}')
+        from .localization import admin_text, admin_error
+        message = await admin_text(service, job.requested_by, 'infra_job_result',
+            p0=job_id, p1=status, p2=html.escape(await admin_error(service, job.requested_by, result[:500])))
+        await service.bot.send_message(job.requested_by, message)
     except Exception:
         pass

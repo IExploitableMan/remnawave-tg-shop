@@ -93,7 +93,7 @@ class InfrastructureDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await restarted.resolve(base_ref), 42)
         self.assertEqual(await restarted.resolve(addon_ref), 43)
 
-    async def test_database_prevents_parallel_active_jobs(self):
+    async def test_database_allows_queue_but_prevents_parallel_running_jobs(self):
         node, deployment = await self.node_fixture()
         deployment.state = 'replaced'
         async with self.factory() as session:
@@ -101,16 +101,29 @@ class InfrastructureDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 await self.service.enqueue(session, node, deployment, 'provision', 111)
         deployment.state = 'active'
         async with self.factory() as session:
-            await self.service.enqueue(session, node, deployment, 'small', 111)
+            first = await self.service.enqueue(session, node, deployment, 'small', 111)
+            first.status = 'running'
             await session.commit()
         async with self.factory() as session:
-            with self.assertRaises(ValueError):
-                await self.service.enqueue(session, node, deployment, 'large', 111)
+            second = await self.service.enqueue(session, node, deployment, 'large', 111)
+            third = await self.service.enqueue(session, node, deployment, 'medium', 222)
+            await session.commit()
+            self.assertEqual((second.status, third.status), ('pending', 'pending'))
         async with self.factory() as session:
-            session.add(Job(node_id=node.id, deployment_id=deployment.id, kind='small', requested_by=222))
+            session.add(Job(node_id=node.id, deployment_id=deployment.id, kind='small', requested_by=222, status='running'))
             with self.assertRaises(IntegrityError):
                 await session.commit()
             await session.rollback()
+        async with self.factory() as session:
+            with self.assertRaises(ValueError):
+                await self.service.enqueue(session, node, deployment, 'provision', 111)
+        async with self.factory() as session:
+            (await session.get(Job, first.id)).status = 'done'
+            await session.flush()
+            (await session.get(Job, second.id)).status = 'running'
+            await session.commit()
+            queued = (await session.execute(select(Job).where(Job.node_id == node.id).order_by(Job.id))).scalars().all()
+            self.assertEqual([j.status for j in queued], ['done', 'running', 'pending'])
 
     async def test_key_propagation_waits_for_busy_node_and_survives_service_restart(self):
         node, deployment = await self.node_fixture()

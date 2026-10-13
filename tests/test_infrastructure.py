@@ -312,6 +312,71 @@ class InfrastructureTests(unittest.IsolatedAsyncioTestCase):
         await api.host_access(host, 'tg', True)
         self.assertTrue(panel._request.call_args.kwargs['json']['isDisabled'])
 
+    async def test_panel_edits_refresh_metadata_without_moving_ssh_credentials(self):
+        service = InfrastructureService(SimpleNamespace(), SimpleNamespace(identities=SimpleNamespace(scope='test')), None, None)
+        node = SimpleNamespace(id=1, panel_uuid='node', host_uuid='old-host', name='old', country='RU', provider_uuid='old-provider', billing_uuid='invoice')
+        deployment = SimpleNamespace(address='203.0.113.1', host_address='old.example', credentials='encrypted',
+            host_public_key='pinned', sni='old.sni', profile_uuid='old-profile', inbound_uuid='old-inbound', node_version='2.8.0')
+        service.api.nodes = AsyncMock(return_value=[{'uuid': 'node', 'name': 'renamed', 'countryCode': 'DE',
+            'providerUuid': 'new-provider', 'address': '203.0.113.2', 'versions': {'node': '3.4.2'}}])
+        service.panel.get_all_hosts = AsyncMock(return_value=[{'uuid': 'new-host', 'nodes': ['node'], 'address': 'new.example',
+            'sni': 'new.sni', 'inbound': {'configProfileUuid': 'new-profile', 'configProfileInboundUuid': 'new-inbound'}}])
+        service.api.billing = AsyncMock(return_value={'billingNodes': []})
+        service.deployment = AsyncMock(return_value=deployment)
+        await service.refresh_node(None, node)
+        self.assertEqual((node.name, node.country, node.provider_uuid, node.host_uuid, node.billing_uuid),
+            ('renamed', 'DE', 'new-provider', 'new-host', None))
+        self.assertEqual((deployment.host_address, deployment.sni, deployment.profile_uuid, deployment.inbound_uuid),
+            ('new.example', 'new.sni', 'new-profile', 'new-inbound'))
+        self.assertEqual((deployment.address, deployment.credentials, deployment.host_public_key),
+            ('203.0.113.1', 'encrypted', 'pinned'))
+        with self.assertRaisesRegex(ValueError, 'IP ноды изменён'):
+            await service.validate_deployment(None, node, deployment)
+
+    async def test_ambiguous_panel_hosts_are_not_reassigned_to_another_host(self):
+        service = InfrastructureService(SimpleNamespace(), SimpleNamespace(identities=SimpleNamespace(scope='test')), None, None)
+        node = SimpleNamespace(id=1, panel_uuid='node', host_uuid='deleted-host', name='node', country='DE', provider_uuid='', billing_uuid=None)
+        service.api.nodes = AsyncMock(return_value=[{'uuid': 'node', 'address': '203.0.113.1'}])
+        service.panel.get_all_hosts = AsyncMock(return_value=[{'uuid': h, 'nodes': ['node']} for h in ('one', 'two')])
+        service.api.billing = AsyncMock(return_value={'billingNodes': []})
+        service.deployment = AsyncMock(return_value=None)
+        await service.refresh_node(None, node)
+        self.assertIsNone(node.host_uuid)
+
+    def test_console_pdf_preserves_text_colors_failure_rows_and_overview_order(self):
+        from unittest.mock import patch
+        from reportlab.pdfgen.canvas import Canvas
+        from bot.services.infrastructure.terminal_report import console_rows, render_console_pdf, PALETTE
+        ansi = 'CPU Model : \x1b[34mEPYC\x1b[0m\nNode Name     Upload       Download\nKazan         100 Mbps     \x1b[31mDownload failed\x1b[0m\nOther         busy         N/A\nIP API        Rate-limit\nScript by Teddysun'
+        rows = console_rows(ansi)
+        visible = '\n'.join(''.join(t for t, _ in row) for row in rows)
+        self.assertIn('Kazan         100 Mbps     Download failed', visible)
+        self.assertIn('busy         N/A', visible)
+        self.assertIn('Rate-limit', visible)
+        self.assertNotIn('Teddysun', visible)
+        self.assertEqual(next(style.foreground for row in rows for text, style in row if text == 'Download failed'), PALETTE[1])
+        records = [dict(id='ipregion', title='Region', output='Google  DE', status='ok', round=1),
+                   dict(id='bench', title='System overview', output=clean_output(ansi), ansi_output=ansi, status='partial', round=1)]
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(Canvas, 'drawImage') as raster, \
+                patch.object(Canvas, 'drawString', autospec=True) as draw:
+            render_console_pdf(Path(directory), {'node': 'node1', 'address': '203.0.113.1',
+                'created_at': '2026-10-13', 'results': records}, [])
+            raster.assert_not_called()
+            text = [call.args[-1] for call in draw.call_args_list]
+            self.assertIn('Download failed', text)
+            self.assertLess(next(i for i,v in enumerate(text) if 'System overview' in v), next(i for i,v in enumerate(text) if 'Region |' in v))
+            self.assertTrue((Path(directory)/'report.pdf').read_bytes().startswith(b'%PDF'))
+
+    def test_console_styles_keep_background_and_reset_without_losing_table_spaces(self):
+        from bot.services.infrastructure.terminal_report import console_rows, PALETTE
+        row = console_rows('Service   \x1b[42;1mYes\x1b[0m    \x1b[38;2;12;34;56mDE\x1b[0m')[0]
+        self.assertEqual(''.join(t for t, _ in row), 'Service   Yes    DE')
+        self.assertEqual(row[1][1].background, PALETTE[2])
+        self.assertTrue(row[1][1].bold)
+        self.assertIsNone(row[2][1].background)
+        self.assertEqual(row[3][1].foreground, '#0c2238')
+
     def test_report_rendering_has_no_sponsor_and_keeps_rounds(self):
         results = [{'title': 'CPU', 'status': 'ok', 'round': i, 'output': 'Процессор работает',
                     'metrics': {'speed': value}} for i, value in enumerate([100, 200, 300], 1)]
@@ -320,5 +385,5 @@ class InfrastructureTests(unittest.IsolatedAsyncioTestCase):
             files = render_reports(Path(directory), {'node': 'node1 (RU)', 'address': '203.0.113.1',
                 'created_at': '2026-10-12T00:00:00+00:00', 'level': 'large', 'results': results})
             self.assertTrue((Path(directory) / 'report.pdf').exists())
-            self.assertEqual(len([f for f in files if f.endswith('.png')]), 3)
+            self.assertEqual(files, ['report.pdf'])
         self.assertEqual(clean_output('CPU: 100\npowered by sponsor\nhttps://t.me/somebody'), 'CPU: 100')

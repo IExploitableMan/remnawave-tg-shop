@@ -46,8 +46,9 @@ silently rotate existing host selections.
 ## Jobs, replacement and billing
 
 Jobs survive bot restarts. A partial interrupted job is marked interrupted for
-manual retry, not blindly restarted. One active job per node is enforced by a
-PostgreSQL partial unique index; an advisory lock elects one infrastructure worker.
+manual retry, not blindly restarted. Multiple pending diagnostics can wait durably
+in FIFO order. One running job per node is enforced by a PostgreSQL partial unique
+index; an advisory lock elects one infrastructure worker.
 
 Replacement installs the new VPS and retains the existing panel node UUID. Node
 and host addresses are switched together with compensation on failed checks.
@@ -70,11 +71,13 @@ Archived node reports remain accessible through the read-only archive menu.
 
 ## Diagnostics
 
-- Small: container, listening ports, panel connection and external TCP 443. A TCP
-  check does not assert a complete authenticated VPN session.
+- Small: container, listening ports, panel connection and external TCP 443,
+  delivered as a formatted Telegram message (including failures). JSON is kept
+  internally for history. A TCP check does not assert a complete authenticated VPN session.
 - Medium: the full one-pass diagnostic catalog, image pages sent through Telegram.
 - Large: the medium catalog plus stability/UDP/IPv6/DNS/route/CDN/memory checks,
-  a PDF and configurable repeated measurements. Default repetitions: one.
+  a dark PDF with selectable monospaced console text, ANSI colors/backgrounds
+  and configurable repeated measurements. Default repetitions: one.
   Extra passes compare variable network performance; they are optional.
 
 Diagnostic sources are pinned by SHA-256 in `infra/diagnostics/scripts.json`.
@@ -170,3 +173,28 @@ panel/node versions and a clean Debian 12 KVM guest, are recorded in
 [infrastructure-acceptance-log.md](infrastructure-acceptance-log.md). Temporary
 Debian guest panel objects/firewall rule were removed and its VM stopped; ordinary
 test panels, bot and nodes remain running. No quality suites were repeated.
+
+## Wizard and panel edits
+
+The client address is the IP/domain placed in the subscription; it defaults to
+the VPS address. Back returns through wizard steps without discarding entered
+values; Back from provider creation returns to provider selection. SSH fingerprint
+retrieval shows progress and handles timeouts while retaining the form. Menus and
+forms use the Russian/English locale catalog and bottom parent-navigation buttons.
+
+Node cards/queued commands refresh panel names, countries, providers, billing
+bindings, host addresses, SNI and selected inbounds. Deleted billing bindings are
+cleared; ambiguous host links are not guessed. If the panel's node IP changes,
+commands require fresh SSH access. Saving access for that new panel IP creates a
+new deployment and retains the previous deployment's credentials/report history.
+Replacements wait for queued/running jobs, so they cannot move a measured VPS.
+
+Migration `0014_infrastructure_job_queue` changes the unique constraint to running
+jobs only; deploy it together with this code (normal bot startup applies it).
+Old reports are rebuilt from saved results on opening; no remote diagnostic
+commands are run. Old checkpoints without ANSI cannot recover original colors;
+status highlighting is applied conservatively. System/network overview comes
+first, and failures/busy/N/A/rate limits are retained.
+
+The correction checklist and local validation are in
+[infrastructure-fixes-plan.md](infrastructure-fixes-plan.md).

@@ -125,16 +125,9 @@ async def quick_check(service, deployment, node):
 ANSI = re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))')
 
 
-def clean_output(raw):
-    # Terminal progress overwrites the current line with CR; retain its final
-    # state rather than producing hundreds of duplicate progress rows.
-    raw = '\n'.join(line.split('\r')[-1] for line in ANSI.sub('', raw).split('\n'))
-    raw = re.sub(r'[\u2800-\u28ff]\x08?|\x08', '', raw)
-    # Remove upstream promotion from user-facing artifacts.
-    return '\n'.join(line for line in raw.splitlines() if not any(token in line.lower() for token in (
-        'sponsor', 'powered by', 'follow:', 'follow ', 't.me/', 'tracerlab', 'stencloud', 'bedolaga',
-        'github.com/', 'bench.sh | bash', 'yabs.sh | bash', 'forked by', 'made with', 'author:', 'script by',
-        'thanks for running', 'from the community, for the community')))
+def clean_output(raw, preserve_ansi=False):
+    from .terminal_report import clean_console
+    return clean_console(raw, preserve_ansi=preserve_ansi)
 
 
 def measurements(output):
@@ -190,8 +183,18 @@ async def run_diagnostics(service, job, node, deployment, config):
             result['status'] = 'partial'
         result['metrics'] = result_measurements(result) or measurements(result['output'])
     if job.kind == 'small':
-        results.append({'title': 'Проверка ноды', 'status': 'ok', 'round': 1,
-                        'output': await quick_check(service, deployment, node), 'metrics': {}})
+        try:
+            output = await quick_check(service, deployment, node)
+            status = 'ok'
+        except (ValueError, RuntimeError, OSError, TimeoutError, asyncssh.Error) as exc:
+            status = 'failed'
+            output = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else 'Ошибка SSH. Проверьте адрес и доступ.'
+        results.append({'title': 'Проверка ноды', 'status': status, 'round': 1,
+                        'output': output, 'metrics': {}})
+        await finalize_report(service, job, node, deployment, directory, results)
+        if status == 'failed':
+            raise RuntimeError(output)
+        return
     else:
         catalog = CATALOG + (EXTRA if job.kind == 'large' else [])
         repeats = config['large_repeats'] if job.kind == 'large' else 1
@@ -223,7 +226,7 @@ async def run_diagnostics(service, job, node, deployment, config):
                         # Every process group is isolated and bounded. Cancellation
                         # kills the process group, not just the SSH channel.
                         await connection.run(f'rm -f {remote}/exit.txt', timeout=10)
-                        script_command = f'cd {remote}; export LC_ALL=C.UTF-8 TERM=dumb NO_COLOR=1; timeout --kill-after=10 {timeout} bash -c {shlex.quote(actual)}; echo $? > {remote}/exit.txt'
+                        script_command = f'cd {remote}; export LC_ALL=C.UTF-8 TERM=xterm-256color CLICOLOR_FORCE=1 FORCE_COLOR=1; unset NO_COLOR; timeout --kill-after=10 {timeout} bash -c {shlex.quote(actual)}; echo $? > {remote}/exit.txt'
                         wrapped = f'setsid bash -c {shlex.quote(script_command)} > {remote}/out.txt 2>&1 < /dev/null & echo $!'
                         started = await connection.run(wrapped, timeout=15)
                         pid = started.stdout.strip()
@@ -252,7 +255,8 @@ async def run_diagnostics(service, job, node, deployment, config):
                         result = {'id': test_id, 'title': title, 'round': iteration,
                                   'status': outcome,
                                   'seconds': round(time.monotonic() - began, 1),
-                                  'output': output, 'metrics': measurements(output)}
+                                  'output': output, 'ansi_output': clean_output(captured.stdout, preserve_ansi=True),
+                                  'metrics': measurements(output)}
                         result['warnings'] = incomplete_checks(test_id, output)
                         if outcome == 'ok' and result['warnings']:
                             result['status'] = 'partial'
@@ -273,7 +277,7 @@ async def finalize_report(service, job, node, deployment, directory, results):
     artifacts = await asyncio.to_thread(render_reports, directory, manifest)
     async with service.factory() as session:
         session.add(Report(job_id=job.id, deployment_id=deployment.id, level=job.kind,
-                           manifest=json.dumps({'directory': str(job.id), 'files': artifacts})))
+                           manifest=json.dumps({'directory': str(job.id), 'files': artifacts, 'renderer_version': 2})))
         await session.commit()
     await send_artifacts(service, job.requested_by, directory, artifacts, job.kind)
 
@@ -290,4 +294,17 @@ async def send_artifacts(service, admin_id, directory, artifacts, level):
             else:
                 await service.bot.send_media_group(admin_id, [InputMediaPhoto(media=FSInputFile(directory / name)) for name in group])
     else:
-        await service.bot.send_document(admin_id, FSInputFile(directory / 'results.json'))
+        from .localization import admin_text, admin_error
+        saved = json.loads((directory / 'results.json').read_text())
+        results = saved['results'] if isinstance(saved, dict) else saved
+        ok = all(r.get('status') == 'ok' for r in results)
+        # The checkpoint remains JSON internally; administrators get readable text.
+        output = '\n'.join(r.get('output', '') for r in results)
+        if ok:
+            details = await admin_text(service, admin_id, 'infra_small_checks_ok')
+        else:
+            details = await admin_text(service, admin_id, 'infra_small_failed', p0=html.escape(await admin_error(service, admin_id, output[:2000])))
+        title = await admin_text(service, admin_id, 'infra_small_title')
+        message = (f'<b>{title}</b>\n<b>{html.escape(saved.get("node", ""))}</b>\n'
+            f'<code>{html.escape(saved.get("address", ""))}</code>\n\n{details}')
+        await service.bot.send_message(admin_id, message, parse_mode='HTML')

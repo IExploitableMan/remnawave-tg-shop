@@ -1,5 +1,7 @@
 """Private administrator UI for infrastructure. No secrets in callback payloads."""
 import html
+import asyncio
+from contextvars import ContextVar
 import ipaddress
 import json
 import re
@@ -8,6 +10,7 @@ from datetime import datetime, timezone
 
 import asyncssh
 from aiogram import F, Router, types
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -18,6 +21,7 @@ from db.dal import app_settings_dal
 from bot.services.infrastructure.settings import read_config, save_config, validate_address, validate_hostname
 from bot.services.infrastructure.provisioning import host_key
 from bot.services.infrastructure.diagnostics import send_artifacts
+from bot.services.infrastructure.localization import bind_language, tr, localize_error
 
 router = Router(name='admin_infrastructure')
 
@@ -35,44 +39,52 @@ def keyboard(buttons):
     return builder.as_markup()
 
 
-def back():
-    return [('Назад', 'infra:home')]
+BACK_TARGET = ContextVar('infra_back_target', default='infra:home')
+
+
+def back(target=None):
+    return [(tr('infra_back'), target or BACK_TARGET.get())]
 
 
 async def show(callback, content, buttons):
-    await callback.message.edit_text(content, reply_markup=keyboard(buttons))
+    try:
+        await callback.message.edit_text(content, reply_markup=keyboard(buttons))
+    except TelegramBadRequest as exc:
+        if 'message is not modified' not in str(exc):
+            raise
 
 
 async def card(callback, service, session, node_id):
     node = await service.node(session, node_id)
+    await service.refresh_node(session, node)
     deployment = await service.deployment(session, node.id)
     entry = await service.billing_entry(session, node)
     await session.commit()
-    text_value = f'<b>{html.escape(node.name)}</b>\nПериод продления: {node.period_days} дней'
+    text_value = tr('infra_node_period', p0=html.escape(node.name), p1=node.period_days)
     provider = next((p for p in await service.api.providers() if p['uuid'] == node.provider_uuid), None)
     if provider:
-        text_value += '\nПровайдер: ' + html.escape(provider['name'])
+        text_value += tr('infra_provider_label') + html.escape(provider['name'])
     if deployment:
-        text_value += f'\nАдрес: <code>{html.escape(deployment.address)}</code>\nHost: <code>{html.escape(deployment.host_address)}</code>\nВерсия ноды: {html.escape(deployment.node_version)}'
+        text_value += tr('infra_node_addresses', p0=html.escape(deployment.address), p1=html.escape(deployment.host_address), p2=html.escape(deployment.node_version))
     if entry:
-        text_value += f"\nОплачено до: {html.escape(entry['nextBillingAt'])}"
+        text_value += tr('infra_paid_until', p0=html.escape(entry['nextBillingAt']))
     else:
-        text_value += '\nСрок оплаты не указан в Infra Billing'
-    text_value += '\nДоступ tg: ' + ('исключён автоматикой' if node.excluded_tg else 'без автоматического исключения')
-    buttons = [('Продлить', f'infra:extend:{node.id}'), ('Заменить VPS', f'infra:replace:{node.id}'),
-               ('SSH-доступ', f'infra:credentials:{node.id}'), ('Диагностика', f'infra:tests:{node.id}'),
-               ('История тестов', f'infra:reports:{node.id}'), ('Перезапустить ноду', f'infra:restart:{node.id}'),
-               ('Обновить ПО ноды', f'infra:upgrade:{node.id}'),
-               ('Редактировать доступ / host', f'infra:edit:{node.id}'),
-               ('Изменить SNI host', f'infra:sni:{node.id}'), ('Удалить', f'infra:delete:{node.id}')] + back()
+        text_value += tr('infra_unknown_deadline')
+    text_value += tr('infra_tg_access') + (tr('infra_excluded') if node.excluded_tg else tr('infra_not_excluded'))
+    buttons = [(tr('infra_extend'), f'infra:extend:{node.id}'), (tr('infra_replace'), f'infra:replace:{node.id}'),
+               (tr('infra_credentials'), f'infra:credentials:{node.id}'), (tr('infra_diagnostics'), f'infra:tests:{node.id}'),
+               (tr('infra_test_history'), f'infra:reports:{node.id}'), (tr('infra_restart'), f'infra:restart:{node.id}'),
+               (tr('infra_upgrade'), f'infra:upgrade:{node.id}'),
+               (tr('infra_edit_access'), f'infra:edit:{node.id}'),
+               (tr('infra_change_sni'), f'infra:sni:{node.id}'), (tr('infra_delete'), f'infra:delete:{node.id}')] + back()
     await show(callback, text_value, buttons)
 
 
 LABELS = {
-    'default_days': 'Начальный срок, дней', 'warning_hours': 'Напоминания, часов до оплаты',
-    'expire_exclude_tg': 'Исключать из tg после срока', 'panel_ip': 'IP сервера панели',
-    'large_repeats': 'Повторы большого теста', 'node_version_2': 'Версия ноды для панели 2.x',
-    'node_version_3': 'Версия ноды для панели 3.x',
+    'default_days': 'infra_default_days', 'warning_hours': 'infra_warning_hours',
+    'expire_exclude_tg': 'infra_expire_exclude', 'panel_ip': 'infra_panel_ip',
+    'large_repeats': 'infra_large_repeats', 'node_version_2': 'infra_version_2',
+    'node_version_3': 'infra_version_3',
 }
 
 
@@ -81,47 +93,54 @@ async def ask(message, state, service, session):
     step = data['steps'][data['position']]
     defaults = {'ssh_port': '22', 'ssh_user': 'root', 'host_address': data.get('address', ''),
                 'days': str(data.get('previous_days') or (await read_config(session))['default_days'])}
-    prompts = {'address': 'Введите IP или адрес сервера.', 'ssh_port': 'Введите SSH-порт.',
-        'ssh_user': 'Введите SSH-логин.', 'password': 'Введите пароль SSH. Он будет сохранён и доступен администраторам.',
-        'host_address': 'Введите адрес host для клиентов.', 'country': 'Введите код страны, например RU, DE, GE или NL.',
-        'days': 'На сколько дней куплен сервер?'}
-    previous = data.get('previous', {})
+    prompts = {'address': tr('infra_ask_address'), 'ssh_port': tr('infra_ask_port'),
+        'ssh_user': tr('infra_ask_user'), 'password': tr('infra_ask_password'),
+        'host_address': tr('infra_ask_client_address'), 'country': tr('infra_ask_country'),
+        'days': tr('infra_ask_days')}
+    previous = dict(data.get('previous', {}))
+    if step in data and step != 'password':
+        previous[step] = data[step]
     prompt = prompts[step]
     if step in previous:
-        prompt += f'\nПредыдущее значение: <code>{html.escape(str(previous[step]))}</code>'
+        prompt += tr('infra_previous_value', p0=html.escape(str(previous[step])))
     buttons = []
+    if step in data:
+        buttons.append((tr('infra_keep_value'), 'infra:keep'))
     if step in defaults:
-        buttons.append((f"По умолчанию: {defaults[step]}", 'infra:default'))
-    buttons += [('Отмена', 'infra:home')]
+        buttons.append((tr('infra_use_default', p0=defaults[step]), 'infra:default'))
+    buttons += [(tr('infra_cancel'), 'infra:home')] + back('infra:wizard_back' if data['position'] else 'infra:home')
+    await state.update_data(phase='fields')
     await message.answer(prompt, reply_markup=keyboard(buttons))
 
 
 async def advance(message, state, service, session, value):
     data = await state.get_data()
+    if data.get('phase', 'fields') != 'fields' or data['position'] >= len(data['steps']):
+        raise ValueError(tr('infra_choose_provider_buttons'))
     field = data['steps'][data['position']]
     if field in {'address', 'host_address'}:
         value = validate_address(value)
     elif field == 'ssh_port':
         value = int(value)
         if not 1 <= value <= 65535:
-            raise ValueError('Порт: 1–65535')
+            raise ValueError(tr('infra_invalid_port'))
     elif field == 'ssh_user':
         if not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', value):
-            raise ValueError('Некорректный SSH-логин')
+            raise ValueError(tr('infra_invalid_user'))
         if value != 'root':
-            raise ValueError('В первой версии установки используйте root')
+            raise ValueError(tr('infra_root_required'))
     elif field == 'password':
         if not value or len(value) > 512 or '\n' in value:
-            raise ValueError('Введите пароль одной строкой, до 512 символов')
+            raise ValueError(tr('infra_invalid_password'))
         value = service.cipher().encrypt(value.encode()).decode()
     elif field == 'country':
         value = value.upper()
         if not re.fullmatch(r'[A-Z]{2}', value):
-            raise ValueError('Нужен двухбуквенный код страны')
+            raise ValueError(tr('infra_invalid_country'))
     elif field == 'days':
         value = int(value)
         if not 1 <= value <= 3650:
-            raise ValueError('Срок: 1–3650 дней')
+            raise ValueError(tr('infra_invalid_days'))
     await state.update_data(**{field: value, 'position': data['position'] + 1})
     if data['position'] + 1 < len(data['steps']):
         await ask(message, state, service, session)
@@ -130,47 +149,104 @@ async def advance(message, state, service, session, value):
         if data.get('replace_id'):
             await confirmation(message, state, service)
         else:
-            providers = await service.api.providers()
-            await message.answer('Выберите провайдера.', reply_markup=keyboard(
-                [(p['name'], f"infra:pickprovider:{p['uuid']}") for p in providers] +
-                [('Добавить провайдера', 'infra:addprovider'), ('Отмена', 'infra:home')]))
+            await choose_provider(message, state, service)
+
+
+async def choose_provider(message, state, service):
+    await state.set_state(InfrastructureStates.input)
+    await state.update_data(phase='providers')
+    providers = await service.api.providers()
+    await message.answer(tr('infra_choose_provider'), reply_markup=keyboard(
+        [(p['name'], f"infra:pickprovider:{p['uuid']}") for p in providers] +
+        [(tr('infra_add_provider'), 'infra:addprovider'), (tr('infra_cancel'), 'infra:home')] + back('infra:wizard_back')))
 
 
 async def confirmation(message, state, service):
     data = await state.get_data()
+    await message.answer(tr('infra_checking_ssh'),
+        reply_markup=keyboard(back('infra:wizard_back')))
+    # A timeout is a recoverable form error, not a lost update. The callback
+    # was already acknowledged and the wizard data stay available for correction.
     public, fingerprint = await host_key(data['address'], int(data['ssh_port']))
-    await state.update_data(host_public_key=public)
+    current = await state.get_data()
+    if current.get('flow') != 'wizard' or any(current.get(k) != data.get(k)
+            for k in ('position', 'address', 'ssh_port', 'provider_uuid')):
+        return  # A Back/edit or newer selection must win over this SSH response.
+    await state.update_data(host_public_key=public, phase='confirm')
     await state.set_state(InfrastructureStates.confirm)
-    await message.answer(f"<b>Установка ноды</b>\nАдрес: {html.escape(data['address'])}\nHost: {html.escape(data['host_address'])}\n"
-        f"Страна: {data['country']}\nСрок: {data['days']} дней\nSSH-ключ сервера: <code>{html.escape(fingerprint)}</code>\n"
-        'Проверьте адрес и отпечаток. Будут настроены Docker, SSH и firewall.',
-        reply_markup=keyboard([('Установить', 'infra:install'), ('Отмена', 'infra:home')]))
+    await message.answer(tr('infra_confirm_install', p0=html.escape(data['address']), p1=html.escape(data['host_address']), p2=data['country'], p3=data['days'], p4=html.escape(fingerprint)),
+        reply_markup=keyboard([(tr('infra_install'), 'infra:install'), (tr('infra_cancel'), 'infra:home')] + back('infra:wizard_back')))
+
+
+async def wizard_back(message, state, service, session, provider_form=False):
+    data = await state.get_data()
+    if provider_form:
+        data = data.get('resume_wizard') or {}
+        if data.get('flow') != 'wizard':
+            raise ValueError(tr('infra_form_closed'))
+        await state.set_data(data)
+        await choose_provider(message, state, service)
+        return
+    if data.get('flow') != 'wizard':
+        raise ValueError(tr('infra_form_closed'))
+    if data.get('phase') == 'confirm' and not data.get('replace_id'):
+        await choose_provider(message, state, service)
+        return
+    position = max(0, min(data['position'], len(data['steps'])) - 1)
+    await state.update_data(position=position, phase='fields')
+    await state.set_state(InfrastructureStates.input)
+    await ask(message, state, service, session)
 
 
 @router.callback_query(F.data.startswith('infra:'))
 async def infrastructure_callback(callback: types.CallbackQuery, state: FSMContext, session,
-                                  infrastructure_service, settings):
+                                  infrastructure_service, settings, i18n_data=None):
+    bind_language(i18n_data, settings, callback)
     service = infrastructure_service
     if callback.from_user.id not in settings.ADMIN_IDS or callback.message.chat.type != 'private':
-        await callback.answer('Нет доступа', show_alert=True); return
+        await callback.answer(tr('infra_access_denied'), show_alert=True); return
     if not settings.INFRA_ENABLED:
-        await callback.answer('Инфраструктура выключена в конфигурации', show_alert=True); return
+        await callback.answer(tr('infra_disabled_config'), show_alert=True); return
     await callback.answer()
     parts = callback.data.split(':')
     action = parts[1]
     argument = parts[2] if len(parts) > 2 else None
+    data = await state.get_data()
+    target = 'infra:home'
+    if action == 'home': target = 'admin_action:runtime_settings'
+    elif action in {'node', 'adopt'}: target = 'infra:nodes'
+    elif action in {'provider', 'addprovider'}: target = 'infra:providers'
+    elif action in {'provideredit', 'payment'}: target = f'infra:provider:{argument}'
+    elif action in {'setting', 'profiles', 'squads', 'squad', 'pool', 'inbound'}: target = 'infra:settings'
+    elif action == 'profile': target = 'infra:profiles'
+    elif action in {'addkey', 'sync_keys'}: target = 'infra:keys'
+    elif action in {'tests', 'test', 'restart', 'upgrade', 'extend', 'edit', 'sni', 'credentials', 'delete', 'reports'}:
+        target = f'infra:node:{argument}'
+    elif action in {'job', 'cancel', 'retry'}: target = 'infra:jobs'
+    elif action in {'notify', 'toggle_notify'}: target = 'infra:home'
+    if action == 'addprovider' and data.get('flow') == 'wizard':
+        target = 'infra:wizard_provider_back'
+    if data.get('flow') == 'wizard' and action in {'default', 'keep', 'pickprovider', 'install'}:
+        target = 'infra:wizard_back'
+    BACK_TARGET.set(target)
+    if action not in {'new', 'replace', 'default', 'keep', 'pickprovider', 'install', 'wizard_back', 'wizard_provider_back'}:
+        await state.update_data(return_to=target)
     try:
+        if action in {'nodes', 'node', 'providers', 'provider', 'settings', 'keys', 'jobs', 'tests', 'reports', 'archive', 'notify'}:
+            await state.clear()
         if action == 'home':
             await state.clear()
-            await show(callback, '<b>Инфраструктура</b>', [('Ноды', 'infra:nodes'), ('Добавить ноду', 'infra:new'),
-                ('Провайдеры', 'infra:providers'), ('Настройки', 'infra:settings'), ('SSH-ключи', 'infra:keys'),
-                ('Все доступы', 'infra:snapshot'), ('Уведомления', 'infra:notify'), ('Задания', 'infra:jobs'),
-                ('Архив нод и тестов', 'infra:archive'),
-                ('Админ-панель', 'admin_action:main')])
+            await show(callback, tr('infra_title'), [(tr('infra_nodes'), 'infra:nodes'), (tr('infra_add_node'), 'infra:new'),
+                (tr('infra_providers'), 'infra:providers'), (tr('infra_settings'), 'infra:settings'), (tr('infra_ssh_keys'), 'infra:keys'),
+                (tr('infra_all_credentials'), 'infra:snapshot'), (tr('infra_notifications'), 'infra:notify'), (tr('infra_jobs'), 'infra:jobs'),
+                (tr('infra_archive'), 'infra:archive'),
+                (tr('infra_back'), 'admin_action:runtime_settings')])
+        elif action in {'wizard_back', 'wizard_provider_back'}:
+            await wizard_back(callback.message, state, service, session, action == 'wizard_provider_back')
         elif action == 'archive':
             nodes = (await session.execute(select(Node).where(Node.panel_scope == service.scope,
                 Node.deleted.is_(True)).order_by(Node.id.desc()))).scalars().all()
-            await show(callback, 'Удалённые ноды — история тестов',
+            await show(callback, tr('infra_archive_title'),
                 [(n.name, f'infra:reports:{n.id}') for n in nodes] + back())
         elif action == 'nodes':
             nodes = await service.nodes(session)
@@ -178,8 +254,8 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             known = {n.panel_uuid for n in nodes}
             for node in await service.api.nodes():
                 if node['uuid'] not in known:
-                    buttons.append((f"Подключить: {node['name']}", f"infra:adopt:{node['uuid']}"))
-            await show(callback, 'Ноды панели и бота', buttons + back())
+                    buttons.append((tr('infra_adopt', p0=node['name']), f"infra:adopt:{node['uuid']}"))
+            await show(callback, tr('infra_nodes_title'), buttons + back())
         elif action == 'adopt':
             node = await service.adopt(session, argument)
             await session.commit()
@@ -189,9 +265,9 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
         elif action in {'new', 'replace'}:
             config = await read_config(session)
             if not config['profile_uuid'] or not config['inbound_uuid'] or not config['panel_ip']:
-                raise ValueError('Сначала выберите профиль, inbound и IP панели в настройках')
+                raise ValueError(tr('infra_configure_first'))
             await state.clear()
-            values = {'flow': 'wizard', 'steps': ['address', 'ssh_port', 'ssh_user', 'password', 'host_address', 'country', 'days'], 'position': 0}
+            values = {'flow': 'wizard', 'phase': 'fields', 'steps': ['address', 'ssh_port', 'ssh_user', 'password', 'host_address', 'country', 'days'], 'position': 0}
             if action == 'replace':
                 node = await service.node(session, argument)
                 deployment = await service.deployment(session, node.id)
@@ -204,133 +280,144 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             await state.update_data(**values)
             await state.set_state(InfrastructureStates.input)
             await ask(callback.message, state, service, session)
+        elif action == 'keep':
+            data = await state.get_data()
+            if data.get('flow') != 'wizard' or data['position'] >= len(data['steps']):
+                raise ValueError(tr('infra_form_closed'))
+            field = data['steps'][data['position']]
+            value = data.get(field)
+            if value is None:
+                raise ValueError(tr('infra_no_default'))
+            if field == 'password':
+                value = service.cipher().decrypt(value.encode()).decode()
+            await advance(callback.message, state, service, session, str(value))
         elif action == 'default':
             data = await state.get_data()
             if data.get('flow') != 'wizard':
-                raise ValueError('Форма закрыта')
+                raise ValueError(tr('infra_form_closed'))
             field = data['steps'][data['position']]
             defaults = {'ssh_port': '22', 'ssh_user': 'root', 'host_address': data.get('address', ''),
                         'days': str(data.get('previous_days') or (await read_config(session))['default_days'])}
             if field not in defaults:
-                raise ValueError('Нет значения по умолчанию')
+                raise ValueError(tr('infra_no_default'))
             await advance(callback.message, state, service, session, defaults[field])
         elif action == 'pickprovider':
             data = await state.get_data()
             if data.get('flow') != 'wizard' or data['position'] != len(data['steps']):
-                raise ValueError('Форма закрыта')
+                raise ValueError(tr('infra_form_closed'))
             if not any(p['uuid'] == argument for p in await service.api.providers()):
-                raise ValueError('Провайдер не найден')
-            await state.update_data(provider_uuid=argument)
+                raise ValueError(tr('infra_provider_not_found'))
+            await state.update_data(provider_uuid=argument, phase='providers')
             await confirmation(callback.message, state, service)
         elif action == 'install':
             if await state.get_state() != InfrastructureStates.confirm.state:
-                raise ValueError('Форма установки закрыта')
+                raise ValueError(tr('infra_install_form_closed'))
             data = await state.get_data()
             if data.get('flow') != 'wizard':
-                raise ValueError('Форма закрыта')
+                raise ValueError(tr('infra_form_closed'))
             values = dict(data, period_days=data['days'], password=service.cipher().decrypt(data['password'].encode()).decode())
             node, job = await service.prepare(session, values, callback.from_user.id, data.get('replace_id'))
             await session.commit()
             await state.clear()
-            await show(callback, f'{html.escape(node.name)}: задание #{job.id} в очереди.', back())
+            BACK_TARGET.set('infra:nodes')
+            await show(callback, tr('infra_node_queued', p0=html.escape(node.name), p1=job.id), back())
         elif action == 'providers':
             providers = await service.api.providers()
-            await show(callback, 'Провайдеры', [(p['name'], f"infra:provider:{p['uuid']}") for p in providers] +
-                       [('Добавить', 'infra:addprovider')] + back())
+            await show(callback, tr('infra_providers'), [(p['name'], f"infra:provider:{p['uuid']}") for p in providers] +
+                       [(tr('infra_add'), 'infra:addprovider')] + back())
         elif action == 'provider':
             provider = next((p for p in await service.api.providers() if p['uuid'] == argument), None)
             if not provider:
-                raise ValueError('Провайдер не найден')
+                raise ValueError(tr('infra_provider_not_found'))
             await show(callback, f"<b>{html.escape(provider['name'])}</b>\n{html.escape(provider.get('loginUrl') or '')}",
-                [('Изменить название/ссылку', f'infra:provideredit:{argument}'),
-                 ('Записать расход', f'infra:payment:{argument}')] + back())
+                [(tr('infra_edit_provider'), f'infra:provideredit:{argument}'),
+                 (tr('infra_record_expense'), f'infra:payment:{argument}')] + back())
         elif action in {'addprovider', 'provideredit', 'payment'}:
             data = await state.get_data()
             await state.update_data(flow=action, provider=argument, resume_wizard=data if data.get('flow') == 'wizard' else None)
             await state.set_state(InfrastructureStates.input)
-            await callback.message.answer('Введите название провайдера первой строкой, ссылку на кабинет второй (необязательно).' if action != 'payment'
-                else 'Введите сумму расхода (число).', reply_markup=keyboard(back()))
+            await callback.message.answer(tr('infra_ask_provider') if action != 'payment'
+                else tr('infra_ask_amount'), reply_markup=keyboard(back()))
         elif action == 'settings':
             config = await read_config(session)
-            await show(callback, 'Настройки инфраструктуры', [(f'{label}: {config[key]}', f'infra:setting:{key}') for key, label in LABELS.items()] +
-                [('Профиль по умолчанию', 'infra:profiles'), ('Squad tg', 'infra:squads'),
-                 ('Список SNI РФ', 'infra:pool:sni_ru'), ('Список SNI не РФ', 'infra:pool:sni_other')] + back())
+            await show(callback, tr('infra_settings_title'), [(f'{tr(label)}: {config[key]}', f'infra:setting:{key}') for key, label in LABELS.items()] +
+                [(tr('infra_default_profile'), 'infra:profiles'), (tr('infra_tg_squad'), 'infra:squads'),
+                 (tr('infra_sni_ru'), 'infra:pool:sni_ru'), (tr('infra_sni_other'), 'infra:pool:sni_other')] + back())
         elif action == 'setting':
             if argument not in LABELS:
-                raise ValueError('Настройка не найдена')
+                raise ValueError(tr('infra_setting_not_found'))
             if argument == 'expire_exclude_tg':
                 config = await read_config(session)
                 await save_config(session, argument, not config[argument], callback.from_user.id)
                 await session.commit()
-                await callback.message.answer('Настройка сохранена.', reply_markup=keyboard(back()))
+                await callback.message.answer(tr('infra_setting_saved'), reply_markup=keyboard(back()))
             else:
                 await state.update_data(flow='setting', key=argument)
                 await state.set_state(InfrastructureStates.input)
-                await callback.message.answer(f'Введите значение: {LABELS[argument]}.', reply_markup=keyboard(back()))
+                await callback.message.answer(tr('infra_ask_setting', p0=tr(LABELS[argument])), reply_markup=keyboard(back()))
         elif action == 'profiles':
             profiles = await service.api.profiles()
-            await show(callback, 'Выберите профиль', [(p['name'], f"infra:profile:{p['uuid']}") for p in profiles] + back())
+            await show(callback, tr('infra_choose_profile'), [(p['name'], f"infra:profile:{p['uuid']}") for p in profiles] + back())
         elif action == 'profile':
             inbounds = await service.panel.get_inbounds_by_profile_uuid(argument, refresh=True)
             if not inbounds:
-                raise ValueError('Нет inbound в профиле')
+                raise ValueError(tr('infra_no_inbounds'))
             await state.update_data(profile=argument)
-            await show(callback, 'Выберите VLESS inbound 443', [(i['tag'], f"infra:inbound:{i['uuid']}") for i in inbounds
+            await show(callback, tr('infra_choose_inbound'), [(i['tag'], f"infra:inbound:{i['uuid']}") for i in inbounds
                 if str(i.get('port')) == '443' and i.get('type', '').lower() == 'vless'] + back())
         elif action == 'inbound':
             data = await state.get_data()
             profile = data.get('profile')
             entries = await service.panel.get_inbounds_by_profile_uuid(profile)
             if not any(i['uuid'] == argument for i in entries or []):
-                raise ValueError('Inbound не найден')
+                raise ValueError(tr('infra_inbound_not_found'))
             await save_config(session, 'profile_uuid', profile, callback.from_user.id)
             await save_config(session, 'inbound_uuid', argument, callback.from_user.id)
             await session.commit()
             await state.clear()
-            await callback.message.answer('Профиль по умолчанию сохранён.', reply_markup=keyboard(back()))
+            await callback.message.answer(tr('infra_profile_saved'), reply_markup=keyboard(back()))
         elif action == 'squads':
             result = await service.api.call('GET', '/internal-squads')
-            await show(callback, 'Выберите squad tg', [(s['name'], f"infra:squad:{s['uuid']}") for s in result['internalSquads']] + back())
+            await show(callback, tr('infra_choose_squad'), [(s['name'], f"infra:squad:{s['uuid']}") for s in result['internalSquads']] + back())
         elif action == 'squad':
             result = await service.api.call('GET', '/internal-squads')
             if not any(s['uuid'] == argument for s in result['internalSquads']):
-                raise ValueError('Squad не найден')
+                raise ValueError(tr('infra_squad_not_found'))
             await save_config(session, 'tg_squad_uuid', argument, callback.from_user.id)
             await session.commit()
-            await callback.message.answer('Squad сохранён.', reply_markup=keyboard(back()))
+            await callback.message.answer(tr('infra_squad_saved'), reply_markup=keyboard(back()))
         elif action == 'pool':
             if argument not in {'sni_ru', 'sni_other'}:
-                raise ValueError('Список не найден')
+                raise ValueError(tr('infra_list_not_found'))
             config = await read_config(session)
             await state.update_data(flow='pool', key=argument)
             await state.set_state(InfrastructureStates.input)
-            await callback.message.answer('Текущий список:\n' + '\n'.join(html.escape(v) for v in config[argument]) +
-                '\n\nОтправьте новый список доменов, каждый с новой строки. Так можно добавить, изменить или удалить записи. «-» очищает список.',
+            await callback.message.answer(tr('infra_current_pool') + '\n'.join(html.escape(v) for v in config[argument]) +
+                tr('infra_ask_pool'),
                 reply_markup=keyboard(back()))
         elif action == 'keys':
             config = await read_config(session)
-            await show(callback, 'Публичные SSH-ключи\n' + '\n'.join(html.escape(k['name']) for k in config['ssh_keys']),
-                [('Добавить ключ', 'infra:addkey'), ('Распространить на все ноды', 'infra:sync_keys')] + back())
+            await show(callback, tr('infra_keys_title') + '\n'.join(html.escape(k['name']) for k in config['ssh_keys']),
+                [(tr('infra_add_key'), 'infra:addkey'), (tr('infra_sync_keys'), 'infra:sync_keys')] + back())
         elif action == 'addkey':
             await state.update_data(flow='addkey')
             await state.set_state(InfrastructureStates.input)
-            await callback.message.answer('Введите название ключа первой строкой, публичный ключ второй строкой.', reply_markup=keyboard(back()))
+            await callback.message.answer(tr('infra_ask_key'), reply_markup=keyboard(back()))
         elif action == 'sync_keys':
             count, waiting = await service.schedule_key_updates(session, callback.from_user.id)
             await session.commit()
-            await callback.message.answer(f'Обновление ключей запланировано для {count} нод.\n'
-                f'Ожидают добавления SSH-доступов: {html.escape(", ".join(waiting)) or "—"}', reply_markup=keyboard(back()))
+            await callback.message.answer(tr('infra_keys_scheduled', p0=count, p1=html.escape(', '.join(waiting)) or '—'), reply_markup=keyboard(back()))
         elif action == 'notify':
             key = f'infra.notify.{callback.from_user.id}'
             row = await app_settings_dal.get_setting(session, key)
             enabled = not row or row.value != 'false'
-            await show(callback, f'Уведомления: {"включены" if enabled else "выключены"}', [('Переключить', 'infra:toggle_notify')] + back())
+            await show(callback, tr('infra_notification_status', p0=tr('infra_enabled') if enabled else tr('infra_disabled_value')), [(tr('infra_toggle'), 'infra:toggle_notify')] + back())
         elif action == 'toggle_notify':
             key = f'infra.notify.{callback.from_user.id}'
             row = await app_settings_dal.get_setting(session, key)
             await app_settings_dal.upsert_setting(session, key, 'true' if row and row.value == 'false' else 'false')
             await session.commit()
-            await callback.message.answer('Настройка уведомлений изменена.', reply_markup=keyboard(back()))
+            await callback.message.answer(tr('infra_notification_saved'), reply_markup=keyboard(back()))
         elif action == 'snapshot':
             await service.publish_snapshots(all_admins=False, admin_id=callback.from_user.id)
         elif action == 'credentials':
@@ -340,33 +427,34 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             node = await service.node(session, argument)
             await state.update_data(flow=action, node_id=node.id)
             await state.set_state(InfrastructureStates.input)
-            prompt = {'extend': f'Введите дни продления (обычно {node.period_days}); можно добавить стоимость через пробел.',
-                'edit': 'Введите адрес, SSH-порт, логин, пароль и адрес host: каждый с новой строки.',
-                'sni': 'Введите новый SNI для host. Значение должно быть допустимо в конфиге сервера.'}[action]
+            prompt = {'extend': tr('infra_ask_extension', p0=node.period_days),
+                'edit': tr('infra_ask_access'),
+                'sni': tr('infra_ask_sni')}[action]
             await callback.message.answer(prompt, reply_markup=keyboard(back()))
         elif action == 'tests':
-            await show(callback, 'Средний: весь набор, один проход. Большой: расширенный набор с повторами.',
-                [('Маленький', f'infra:test:{argument}:small'), ('Средний', f'infra:test:{argument}:medium'),
-                 ('Большой', f'infra:test:{argument}:large')] + back())
+            await show(callback, tr('infra_test_levels'),
+                [(tr('infra_small_test'), f'infra:test:{argument}:small'), (tr('infra_medium_test'), f'infra:test:{argument}:medium'),
+                 (tr('infra_large_test'), f'infra:test:{argument}:large')] + back())
         elif action in {'test', 'restart', 'upgrade'}:
             node = await service.node(session, argument)
             deployment = await service.deployment(session, node.id)
             if not deployment:
-                raise ValueError('Сначала сохраните SSH-доступ для существующей ноды')
+                raise ValueError(tr('infra_save_access_first'))
+            await service.validate_deployment(session, node, deployment)
             kind = parts[3] if action == 'test' else action
             if kind not in {'small', 'medium', 'large', 'restart', 'upgrade'}:
-                raise ValueError('Неизвестное действие')
+                raise ValueError(tr('infra_unknown_action'))
             job = await service.enqueue(session, node, deployment, kind, callback.from_user.id)
             await session.commit()
-            await callback.message.answer(f'Задание #{job.id} в очереди.', reply_markup=keyboard(back()))
+            await callback.message.answer(tr('infra_job_queued', p0=job.id), reply_markup=keyboard(back()))
         elif action == 'jobs':
             jobs = (await session.execute(select(Job).join(Node).where(Node.panel_scope == service.scope).order_by(Job.id.desc()).limit(30))).scalars().all()
-            await show(callback, '\n'.join(f'#{j.id} {j.kind}: {j.status} / {html.escape(j.stage)}' for j in jobs) or 'Нет заданий',
+            await show(callback, '\n'.join(f'#{j.id} {j.kind}: {j.status} / {html.escape(j.stage)}' for j in jobs) or tr('infra_no_jobs'),
                 [(f'#{j.id}', f'infra:job:{j.id}') for j in jobs] + back())
         elif action in {'job', 'cancel', 'retry'}:
             job = await session.get(Job, int(argument))
             if not job:
-                raise ValueError('Задание не найдено')
+                raise ValueError(tr('infra_job_not_found'))
             node = await service.node(session, job.node_id)
             if action == 'cancel':
                 if job.status == 'pending':
@@ -376,7 +464,7 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
                 await session.commit()
             elif action == 'retry':
                 if job.status not in {'failed', 'interrupted', 'cancelled'}:
-                    raise ValueError('Это задание нельзя повторить')
+                    raise ValueError(tr('infra_cannot_retry'))
                 deployment = await session.get(Deployment, job.deployment_id)
                 new_job = await service.enqueue(session, node, deployment, job.kind, callback.from_user.id)
                 if job.kind in {'medium', 'large'}:
@@ -387,58 +475,77 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
                         target.mkdir(mode=0o700, parents=True, exist_ok=True)
                         shutil.copyfile(source, target / 'results.json')
                 await session.commit()
-                await callback.message.answer(f'Повтор: задание #{new_job.id}', reply_markup=keyboard(back()))
+                await callback.message.answer(tr('infra_retry_queued', p0=new_job.id), reply_markup=keyboard(back()))
             else:
-                buttons = [('Остановить', f'infra:cancel:{job.id}')] if job.status in {'pending', 'running'} else []
+                buttons = [(tr('infra_stop'), f'infra:cancel:{job.id}')] if job.status in {'pending', 'running'} else []
                 if job.status in {'failed', 'interrupted', 'cancelled'}:
-                    buttons.append(('Повторить', f'infra:retry:{job.id}'))
+                    buttons.append((tr('infra_retry'), f'infra:retry:{job.id}'))
                 await show(callback, f'#{job.id}: {job.status}\n{html.escape(job.stage)}\n{html.escape(job.result or "")}', buttons + back())
         elif action == 'reports':
             node = await service.node(session, argument, include_deleted=True)
             reports = (await session.execute(select(Report, Deployment.address).join(Deployment).where(
                 Deployment.node_id == node.id).order_by(Report.id.desc()).limit(30))).all()
-            await show(callback, 'История тестов', [(f'{r.created_at:%d.%m %H:%M} {address} {r.level}', f'infra:report:{r.id}')
+            BACK_TARGET.set('infra:archive' if node.deleted else f'infra:node:{node.id}')
+            await show(callback, tr('infra_test_history'), [(f'{r.created_at:%d.%m %H:%M} {address} {r.level}', f'infra:report:{r.id}')
                 for r, address in reports] + back())
         elif action in {'report', 'report_raw'}:
             report = await session.get(Report, int(argument))
             if not report:
-                raise ValueError('Отчёт не найден')
+                raise ValueError(tr('infra_report_not_found'))
             deployment = await session.get(Deployment, report.deployment_id)
-            await service.node(session, deployment.node_id, include_deleted=True)
+            node = await service.node(session, deployment.node_id, include_deleted=True)
+            BACK_TARGET.set(f'infra:reports:{deployment.node_id}')
             manifest = json.loads(report.manifest)
             directory = Path(settings.INFRA_ARTIFACT_DIR) / 'reports' / manifest['directory']
             if action == 'report_raw':
                 await service.bot.send_document(callback.from_user.id, types.FSInputFile(directory / 'results.json'))
             else:
+                if manifest.get('renderer_version') != 2:
+                    source = directory / 'results.json'
+                    if not source.exists():
+                        raise ValueError(tr('infra_report_source_missing'))
+                    saved = json.loads(source.read_text())
+                    if isinstance(saved, list):
+                        saved = {'node': node.name, 'address': deployment.address,
+                            'created_at': report.created_at.isoformat(), 'level': report.level, 'results': saved}
+                    await callback.message.answer(tr('infra_rendering_saved'))
+                    from bot.services.infrastructure.reports import render_reports
+                    manifest['files'] = await asyncio.to_thread(render_reports, directory, saved)
+                    manifest['renderer_version'] = 2
+                    report.manifest = json.dumps(manifest)
+                    await session.commit()
                 await send_artifacts(service, callback.from_user.id, directory, manifest['files'], report.level)
-                await callback.message.answer('Исходные результаты сохранены.', reply_markup=keyboard([
-                    ('Скачать JSON', f'infra:report_raw:{report.id}')] + back()))
+                await callback.message.answer(tr('infra_raw_saved'), reply_markup=keyboard([
+                    (tr('infra_download_json'), f'infra:report_raw:{report.id}')] + back()))
         elif action == 'delete':
             node = await service.node(session, argument)
-            await show(callback, f'Удалить {html.escape(node.name)} из панели вместе со связанным host и биллингом?\nVPS у провайдера останется.',
-                [('Подтвердить удаление', f'infra:delete_confirm:{node.id}')] + back())
+            await show(callback, tr('infra_confirm_delete', p0=html.escape(node.name)),
+                [(tr('infra_delete_confirm'), f'infra:delete_confirm:{node.id}')] + back())
         elif action == 'delete_confirm':
             node = await service.node(session, argument)
             await service.delete(session, node)
             await session.commit()
             await service.publish_snapshots()
-            await show(callback, 'Объекты удалены. История тестов сохранена.', back())
-    except (ValueError, RuntimeError) as exc:
+            await show(callback, tr('infra_deleted'), back())
+    except (ValueError, RuntimeError, OSError, TimeoutError, asyncssh.Error) as exc:
         await session.rollback()
-        await callback.message.answer(html.escape(str(exc)), reply_markup=keyboard(back()))
+        safe = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else tr('infra_ssh_timeout')
+        await callback.message.answer(html.escape(localize_error(safe)), reply_markup=keyboard(back()))
 
 
 @router.message(InfrastructureStates.input)
-async def infrastructure_input(message: types.Message, state: FSMContext, session, infrastructure_service, settings):
+async def infrastructure_input(message: types.Message, state: FSMContext, session, infrastructure_service, settings, i18n_data=None):
+    bind_language(i18n_data, settings, message)
     if message.from_user.id not in settings.ADMIN_IDS or message.chat.type != 'private':
         return
     if not settings.INFRA_ENABLED:
         await state.clear()
-        await message.answer('Инфраструктура выключена.')
+        await message.answer(tr('infra_disabled'))
         return
     service = infrastructure_service
     data = await state.get_data()
     value = message.text or ''
+    BACK_TARGET.set(data.get('return_to') or ('infra:wizard_back' if data.get('flow') == 'wizard' else 'infra:home'))
     try:
         flow = data.get('flow')
         if flow == 'wizard':
@@ -449,7 +556,7 @@ async def infrastructure_input(message: types.Message, state: FSMContext, sessio
             name, url = name.strip(), url.strip()
             from urllib.parse import urlsplit
             if len(name) < 2 or len(name) > 30 or (url and urlsplit(url).scheme not in {'http', 'https'}):
-                raise ValueError('Название до 30 символов; ссылка http/https')
+                raise ValueError(tr('infra_invalid_provider'))
             payload = {'name': name}
             if url:
                 payload['loginUrl'] = url
@@ -458,13 +565,18 @@ async def infrastructure_input(message: types.Message, state: FSMContext, sessio
             result = await service.api.call('PATCH' if flow == 'provideredit' else 'POST', '/infra-billing/providers', payload)
             if data.get('resume_wizard'):
                 wizard = data['resume_wizard']
-                await state.clear(); await state.update_data(**wizard, provider_uuid=result['uuid'])
+                result = (result.get('provider') or result) if isinstance(result, dict) else {}
+                if not result.get('uuid'):
+                    raise RuntimeError(tr('infra_provider_response_invalid'))
+                wizard = dict(wizard, provider_uuid=result['uuid'], phase='providers')
+                await state.clear(); await state.set_data(wizard)
+                await state.set_state(InfrastructureStates.input)
                 await confirmation(message, state, service)
                 return
         elif flow == 'payment':
             amount = float(value)
             if not 0 <= amount <= 100000000 or amount != amount:
-                raise ValueError('Некорректная сумма')
+                raise ValueError(tr('infra_invalid_amount'))
             await service.api.call('POST', '/infra-billing/history', {'providerUuid': data['provider'],
                 'amount': amount, 'billedAt': datetime.now(timezone.utc).isoformat()})
         elif flow == 'setting':
@@ -472,56 +584,57 @@ async def infrastructure_input(message: types.Message, state: FSMContext, sessio
             if key == 'warning_hours':
                 parsed = sorted(set(int(v) for v in re.split(r'[\s,]+', value.strip())), reverse=True)
                 if not parsed or any(v < 0 or v > 8760 for v in parsed):
-                    raise ValueError('Укажите часы от 0 до 8760 через пробел')
+                    raise ValueError(tr('infra_invalid_hours'))
             elif key in {'default_days', 'large_repeats'}:
                 parsed = int(value)
                 if not 1 <= parsed <= (10 if key == 'large_repeats' else 3650):
-                    raise ValueError('Значение вне диапазона')
+                    raise ValueError(tr('infra_out_of_range'))
             elif key == 'panel_ip':
                 parsed = str(ipaddress.ip_address(value.strip()))
             else:
                 parsed = value.strip()
                 if not re.fullmatch(r'\d+\.\d+\.\d+', parsed):
-                    raise ValueError('Версия вида 3.4.2')
+                    raise ValueError(tr('infra_invalid_version'))
             await save_config(session, key, parsed, message.from_user.id)
         elif flow == 'pool':
             entries = [] if value.strip() == '-' else list(dict.fromkeys(validate_hostname(v) for v in value.splitlines() if v.strip()))
             if len(entries) > 200:
-                raise ValueError('Максимум 200 SNI')
+                raise ValueError(tr('infra_sni_limit'))
             await save_config(session, data['key'], entries, message.from_user.id)
         elif flow == 'addkey':
             name, separator, public = value.strip().partition('\n')
             if not separator or not name or len(name) > 64:
-                raise ValueError('Введите название и публичный ключ двумя строками')
+                raise ValueError(tr('infra_invalid_key_input'))
             key = asyncssh.import_public_key(public)
             public = key.export_public_key().decode().strip()
             await session.execute(text('SELECT pg_advisory_xact_lock(74120303)'))
             config = await read_config(session)
             if any(k['key'] == public for k in config['ssh_keys']):
-                raise ValueError('Этот ключ уже добавлен')
+                raise ValueError(tr('infra_duplicate_key'))
             config['ssh_keys'].append({'name': name, 'key': public})
             await save_config(session, 'ssh_keys', config['ssh_keys'], message.from_user.id)
             await service.schedule_key_updates(session, message.from_user.id)
         elif flow == 'extend':
             parts = value.split()
             if len(parts) not in {1, 2}:
-                raise ValueError('Дни и необязательная стоимость')
+                raise ValueError(tr('infra_invalid_extension'))
             amount = float(parts[1]) if len(parts) == 2 else None
             if amount is not None and not 0 <= amount <= 100000000:
-                raise ValueError('Некорректная сумма')
+                raise ValueError(tr('infra_invalid_amount'))
             node = await service.node(session, data['node_id'])
             deadline = await service.extend(session, node, int(parts[0]), amount)
-            await message.answer(f'Оплачено до {deadline:%d.%m.%Y %H:%M UTC}')
+            await message.answer(tr('infra_extended_until', p0=f'{deadline:%d.%m.%Y %H:%M UTC}'))
         elif flow == 'edit':
             entries = value.splitlines()
             if len(entries) != 5:
-                raise ValueError('Нужно пять строк: адрес, порт, логин, пароль, адрес host')
+                raise ValueError(tr('infra_five_lines'))
             address, port, user, password, host_address = entries
             address, host_address = validate_address(address), validate_address(host_address)
             port = int(port)
             if not 1 <= port <= 65535 or user != 'root' or not password:
-                raise ValueError('Проверьте порт, root-логин и пароль')
+                raise ValueError(tr('infra_check_access'))
             node = await service.node(session, data['node_id'])
+            current_node = await service.refresh_node(session, node)
             deployment = await service.deployment(session, node.id)
             public, fingerprint = await host_key(address, port)
             async with asyncssh.connect(host=address, port=port, username=user, password=password,
@@ -533,7 +646,7 @@ async def infrastructure_input(message: types.Message, state: FSMContext, sessio
                 cp = panel_node['configProfile']
                 inbounds = cp['activeInbounds']
                 if len(inbounds) != 1 or not node.host_uuid:
-                    raise ValueError('Для подключения требуется один inbound и однозначно связанный host')
+                    raise ValueError(tr('infra_ambiguous_host'))
                 entry = await service.billing_entry(session, node)
                 deployment = Deployment(node_id=node.id, state='active', address=address, host_address=host_address,
                     ssh_port=port, ssh_user=user, credentials=service.cipher().encrypt(password.encode()).decode(),
@@ -544,38 +657,53 @@ async def infrastructure_input(message: types.Message, state: FSMContext, sessio
                 session.add(deployment)
             else:
                 if address != deployment.address:
-                    raise ValueError('Для нового сервера используйте «Заменить VPS», чтобы сохранить историю')
+                    if not current_node or validate_address(current_node['address']) != address:
+                        raise ValueError(tr('infra_use_replace'))
+                    # Adopt an IP changed directly in the panel as a new physical
+                    # deployment; previous credentials and reports retain history.
+                    previous = deployment
+                    previous.state = 'replaced'
+                    deployment = Deployment(node_id=node.id, state='active', address=address,
+                        host_address=host_address, ssh_port=port, ssh_user=user,
+                        credentials=service.cipher().encrypt(password.encode()).decode(),
+                        host_public_key=public, profile_uuid=previous.profile_uuid,
+                        inbound_uuid=previous.inbound_uuid, node_version=previous.node_version,
+                        paid_until=previous.paid_until)
+                    session.add(deployment)
                 deployment.ssh_port, deployment.ssh_user = port, user
                 deployment.credentials = service.cipher().encrypt(password.encode()).decode()
                 deployment.host_public_key, deployment.host_address = public, host_address
+            if not node.host_uuid:
+                raise ValueError(tr('infra_ambiguous_host'))
             await service.api.call('PATCH', '/hosts', {'uuid': node.host_uuid, 'address': host_address})
             await session.commit()
             await service.publish_snapshots()
-            await message.answer(f'SSH-доступ сохранён. Отпечаток: <code>{html.escape(fingerprint)}</code>')
+            await message.answer(tr('infra_credentials_saved', p0=html.escape(fingerprint)))
         elif flow == 'sni':
             sni = validate_hostname(value)
             node = await service.node(session, data['node_id'])
             deployment = await service.deployment(session, node.id)
             if not deployment:
-                raise ValueError('Сначала подключите доступ к ноде')
+                raise ValueError(tr('infra_attach_access_first'))
+            await service.validate_deployment(session, node, deployment)
             inbounds = await service.panel.get_inbounds_by_profile_uuid(deployment.profile_uuid, refresh=True)
             inbound = next((i for i in inbounds or [] if i['uuid'] == deployment.inbound_uuid), None)
             if not inbound:
-                raise ValueError('Не удалось получить выбранный inbound для проверки SNI')
+                raise ValueError(tr('infra_inbound_unavailable'))
             raw = (inbound or {}).get('rawInbound') or {}
             if isinstance(raw, str):
                 raw = json.loads(raw)
             reality = (raw.get('streamSettings') or {}).get('realitySettings')
             if reality and sni not in reality.get('serverNames', []):
-                raise ValueError('Этот SNI не разрешён выбранным REALITY inbound')
+                raise ValueError(tr('infra_sni_not_allowed'))
             await service.api.call('PATCH', '/hosts', {'uuid': node.host_uuid, 'sni': sni})
             deployment.sni = sni
         else:
-            raise ValueError('Форма закрыта')
+            raise ValueError(tr('infra_form_closed'))
         await session.commit()
         await state.clear()
-        await message.answer('Сохранено.', reply_markup=keyboard(back()))
-    except (ValueError, RuntimeError, asyncssh.Error) as exc:
+        await message.answer(tr('infra_saved'), reply_markup=keyboard(back()))
+    except (ValueError, RuntimeError, OSError, TimeoutError, asyncssh.Error) as exc:
         await session.rollback()
-        safe = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else 'Ошибка SSH. Проверьте адрес и доступ.'
-        await message.answer(html.escape(safe), reply_markup=keyboard(back()))
+        safe = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else tr('infra_ssh_error')
+        await message.answer(html.escape(localize_error(safe)), reply_markup=keyboard(back()))

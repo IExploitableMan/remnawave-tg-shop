@@ -59,9 +59,13 @@ class InfrastructureService:
     async def enqueue(self, session, node, deployment, kind, admin_id):
         if kind == 'provision' and deployment.state in {'replaced', 'superseded'}:
             raise ValueError('Этот VPS уже заменён. Используйте текущую карточку ноды.')
-        if (await session.execute(select(Job.id).where(Job.node_id == node.id,
-            Job.status.in_(['pending', 'running'])))).first():
-            raise ValueError('У этой ноды уже есть активное задание')
+        # Serialize enqueues with replacement: measurements may wait, but a
+        # pending installation must not supersede the VPS being measured.
+        await session.execute(select(Node.id).where(Node.id == node.id).with_for_update())
+        active = (await session.execute(select(Job.kind).where(Job.node_id == node.id,
+            Job.status.in_(['pending', 'running'])))).scalars().all()
+        if active and (kind == 'provision' or 'provision' in active):
+            raise ValueError('Дождитесь завершения установки ноды перед новым заданием')
         job = Job(node_id=node.id, deployment_id=deployment.id, kind=kind, requested_by=admin_id)
         session.add(job)
         await session.flush()
@@ -110,12 +114,23 @@ class InfrastructureService:
             Deployment.address == values['address'], Deployment.state.in_(['active', 'pending'])))).scalars().all()
         if any(node_id != replace_id for node_id in duplicates):
             raise ValueError('Этот адрес уже используется другой нодой или заданием')
-        selected_provider = (await self.node(session, replace_id)).provider_uuid if replace_id else values['provider_uuid']
+        if replace_id:
+            current_node = await self.node(session, replace_id)
+            await self.refresh_node(session, current_node)
+        selected_provider = current_node.provider_uuid if replace_id else values['provider_uuid']
         if not any(p['uuid'] == selected_provider for p in await self.api.providers()):
             raise ValueError('Провайдер ноды отсутствует в Infra Billing')
         all_panel = await self.api.nodes()
         if replace_id:
             node = await self.node(session, replace_id)
+            await session.execute(select(Node.id).where(Node.id == node.id).with_for_update())
+            if (await session.execute(select(Job.id).where(Job.node_id == node.id,
+                    Job.status.in_(['pending', 'running'])))).first():
+                raise ValueError('Дождитесь завершения заданий перед заменой VPS')
+            await session.execute(select(Node.id).where(Node.id == node.id).with_for_update())
+            if (await session.execute(select(Job.id).where(Job.node_id == node.id,
+                    Job.status.in_(['pending', 'running'])))).first():
+                raise ValueError('Дождитесь завершения заданий перед заменой VPS')
             node.period_days = int(values['period_days'])
             stale = (await session.execute(select(Deployment).where(
                 Deployment.node_id == node.id, Deployment.state == 'pending'))).scalars().all()
@@ -174,6 +189,53 @@ class InfrastructureService:
                 node.provider_uuid = entry['providerUuid']
         return node
 
+    async def refresh_node(self, session, node):
+        """Read mutable panel metadata without silently moving stored SSH access."""
+        if not node.panel_uuid:
+            return
+        current = next((n for n in await self.api.nodes() if n['uuid'] == node.panel_uuid), None)
+        if not current:
+            raise ValueError('Нода удалена из панели. Доступы и история сохранены в боте.')
+        hosts = await self.panel.get_all_hosts()
+        if hosts is None:
+            raise RuntimeError('Не удалось получить hosts')
+        node.name = current.get('name') or node.name
+        node.country = current.get('countryCode') or node.country
+        node.provider_uuid = current.get('providerUuid') or ''
+        candidates = [h for h in hosts if h.get('nodes') == [node.panel_uuid]]
+        host = next((h for h in candidates if h['uuid'] == node.host_uuid), None)
+        if not host:
+            host = candidates[0] if len(candidates) == 1 else None
+        node.host_uuid = host['uuid'] if host else None
+        entry = await self.billing_entry(session, node)
+        deployment = await self.deployment(session, node.id)
+        if deployment:
+            deployment.paid_until = (datetime.fromisoformat(entry['nextBillingAt'].replace('Z', '+00:00'))
+                if entry and entry.get('nextBillingAt') else None)
+        if deployment and host:
+            deployment.host_address = host.get('address') or deployment.host_address
+            deployment.sni = host.get('sni') or None
+            inbound = host.get('inbound') or {}
+            cp = current.get('configProfile') or {}
+            active = [i['uuid'] if isinstance(i, dict) else i for i in cp.get('activeInbounds', [])]
+            if cp.get('activeConfigProfileUuid') and len(active) == 1:
+                deployment.profile_uuid = cp['activeConfigProfileUuid']
+                deployment.inbound_uuid = active[0]
+            elif inbound.get('configProfileUuid') and inbound.get('configProfileInboundUuid'):
+                deployment.profile_uuid = inbound['configProfileUuid']
+                deployment.inbound_uuid = inbound['configProfileInboundUuid']
+            version = (current.get('versions') or {}).get('node')
+            if version:
+                deployment.node_version = version
+        # A manual node-address change may mean a different physical server.
+        # Credentials/host-key cannot be reused safely just because metadata changed.
+        return current
+
+    async def validate_deployment(self, session, node, deployment):
+        current = await self.refresh_node(session, node)
+        if current and validate_address(current['address']) != validate_address(deployment.address):
+            raise ValueError('IP ноды изменён в панели. Сохраните SSH-доступ нового сервера перед запуском задания.')
+
     async def billing_entry(self, session, node, billing=None):
         billing = billing if billing is not None else await self.api.billing()
         entries = (billing or {}).get('billingNodes', [])
@@ -190,6 +252,8 @@ class InfrastructureService:
             provider = entry.get('providerUuid') or (entry.get('provider') or {}).get('uuid')
             if provider:
                 node.provider_uuid = provider
+        else:
+            node.billing_uuid = None
         return entry
 
     async def extend(self, session, node, days, amount=None):

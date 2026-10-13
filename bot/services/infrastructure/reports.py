@@ -1,13 +1,8 @@
 """Local PNG/PDF rendering. No upload service or sponsor content."""
-import html
 import statistics
 import textwrap
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
-from reportlab.platypus import SimpleDocTemplate, Paragraph, PageBreak, Spacer, Image as PDFImage
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 
 FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
 MONO = '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf'
@@ -93,11 +88,17 @@ def aggregate(results):
 
 
 def render_reports(directory, manifest):
+    if manifest['level'] == 'large':
+        from .terminal_report import render_console_pdf
+        return [render_console_pdf(directory, manifest, aggregate(manifest['results']))]
+    if manifest['level'] == 'small':
+        return []  # The quick report is delivered as formatted Telegram text.
     title_font = ImageFont.truetype(FONT, 30)
     label_font = ImageFont.truetype(FONT, 20)
     mono_font = ImageFont.truetype(MONO, 18)
     files = []
-    for index, result in enumerate(manifest['results'], 1):
+    from .terminal_report import report_results
+    for index, result in enumerate(report_results(manifest['results']), 1):
         summaries = summary_pages(directory, manifest, result, index, title_font, label_font)
         if summaries:
             files.extend(summaries)
@@ -121,27 +122,4 @@ def render_reports(directory, manifest):
             filename = f'{index:02d}-{page:02d}.png'
             image.save(directory / filename)
             files.append(filename)
-    if manifest['level'] == 'large':
-        pdfmetrics.registerFont(TTFont('InfraSans', FONT))
-        pdfmetrics.registerFont(TTFont('InfraMono', MONO))
-        styles = getSampleStyleSheet()
-        for style in styles.byName.values():
-            style.fontName = 'InfraSans'
-        styles['Code'].fontName = 'InfraMono'
-        styles['Code'].fontSize = 7
-        styles['Code'].leading = 9
-        story = [Paragraph(html.escape(manifest['node']), styles['Title']),
-                 Paragraph(html.escape(f"{manifest['address']} — {manifest['created_at']}"), styles['Normal']),
-                 Spacer(1, 16)]
-        for item in aggregate(manifest['results']):
-            story.append(Paragraph(html.escape(f"{item['test']} / {item['metric']}: "
-                f"min {item['min']:.2f}, median {item['median']:.2f}, max {item['max']:.2f} ({item['count']} замеров)"), styles['Normal']))
-        for filename in files:
-            with Image.open(directory/filename) as picture:
-                width, height = picture.size
-            scale = min(490/width, 690/height)
-            story += [PageBreak(), PDFImage(str(directory/filename), width=width*scale, height=height*scale)]
-        filename = 'report.pdf'
-        SimpleDocTemplate(str(directory / filename)).build(story)
-        files.append(filename)
     return files

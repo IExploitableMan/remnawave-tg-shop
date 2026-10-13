@@ -163,3 +163,10 @@ Do not apply production migrations or install remote servers as part of local te
   synchronization; the temporary key was removed and the original authorized keys
   were restored. The current administrator UI supports adding/synchronizing keys,
   not deleting them.
+
+Final acceptance details, including the restored legacy 2.8.1 stack, required
+`forceRestart` body in both APIs, API-outage recovery, SSH-only adoption, mixed
+panel/node versions and a clean Debian 12 KVM guest, are recorded in
+[infrastructure-acceptance-log.md](infrastructure-acceptance-log.md). Temporary
+Debian guest panel objects/firewall rule were removed and its VM stopped; ordinary
+test panels, bot and nodes remain running. No quality suites were repeated.

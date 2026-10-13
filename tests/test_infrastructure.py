@@ -228,13 +228,19 @@ class InfrastructureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(node.panel_uuid)
         api.call.assert_not_awaited()
 
-    async def test_node_restart_uses_v3_force_body(self):
-        panel = SimpleNamespace(api_major=AsyncMock(return_value=3), _request=AsyncMock(return_value={'response': {}}))
-        api = PanelInfrastructureApi(panel)
-        await api.restart_node('node-uuid', force=True)
-        request = panel._request.call_args
-        self.assertEqual(request.args, ('POST', '/nodes/node-uuid/actions/restart'))
-        self.assertEqual(request.kwargs['json'], {'forceRestart': True})
+    async def test_node_restart_sends_required_boolean_for_both_panel_versions(self):
+        for major in (2, 3):
+            for force in (False, True):
+                with self.subTest(major=major, force=force):
+                    panel = SimpleNamespace(api_major=AsyncMock(return_value=major), _request=AsyncMock(return_value={'response': {}}))
+                    api = PanelInfrastructureApi(panel)
+                    if force:
+                        await api.restart_node('node-uuid', force=True)
+                    else:
+                        await api.restart_node('node-uuid')
+                    request = panel._request.call_args
+                    self.assertEqual(request.args, ('POST', '/nodes/node-uuid/actions/restart'))
+                    self.assertEqual(request.kwargs['json'], {'forceRestart': force})
 
     async def test_reality_sni_requires_exact_allowed_name_before_installation(self):
         from unittest.mock import patch

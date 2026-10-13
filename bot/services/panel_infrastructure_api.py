@@ -42,7 +42,9 @@ class PanelInfrastructureApi:
         return await self.call('PATCH', '/nodes', values)
 
     async def restart_node(self, uuid, force=False):
-        payload = {'forceRestart': force} if await self.panel.api_major() == 3 else None
+        # Required by the actual 2.8.1 API as well as 3.x, despite its absence
+        # from the earlier downloaded 2.x specification.
+        payload = {'forceRestart': force}
         return await self.call('POST', f'/nodes/{uuid}/actions/restart', payload)
 
     @staticmethod

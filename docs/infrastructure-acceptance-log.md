@@ -246,3 +246,15 @@ their actual account. No benchmark or production change was performed.
 
 See infrastructure-warp-pilot.md and `/tmp/infra-warp-pilot/` for evidence,
 private-backup locations, isolated routing scope and rollback instructions.
+
+## Accessible WARP ingress, 2026-10-13
+
+At the owner's request, repeated the pilot on 95.182.88.203 instead of the
+client-inaccessible 104.* server. Dynamic побрили.рф checks showed TLS filtering
+on 104.* and no block on 95.203. node77 received a separate Acceptance WARP 95
+profile with learn.microsoft.com REALITY target/SNI and Firefox fingerprint.
+Real external client, direct/selected exits, fail-closed stop/recovery and IPv6
+guard passed. Gemini HTML did not contain the country-refusal phrase; actual
+account testing remains the owner's check. A fresh private 24-hour link was
+prepared. Backups/rollback and full evidence are in the WARP pilot document and
+/tmp/infra-warp-95. Production and server-quality benchmarks were untouched.

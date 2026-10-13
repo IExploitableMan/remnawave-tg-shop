@@ -94,3 +94,32 @@ until those lifecycle operations are integrated and checked.
 Reusable helpers and raw evidence: `/tmp/infra-warp-pilot/`. No credentials are
 embedded in this document. Country/region decisions remain Google's, and a
 healthy WireGuard handshake alone is not proof that Gemini accepts an exit.
+
+## Accessible ingress follow-up: 95.182.88.203
+
+The owner reported that 104.252.89.173 and the 154.* panel host cannot be used
+for their client test and requested the 95.* servers, learn.microsoft.com SNI,
+and firefox or qq fingerprint. The dynamic побрили.рф page classified
+104.252.89.173 as reachable by ping but TLS-filtered from Russia;
+95.182.88.203 passed Russian and foreign TLS probes. 95.182.88.225 had no
+443 listener and was left as the unused old stand.
+
+A second isolated pilot was configured on existing node77 at 95.182.88.203:
+Acceptance WARP 95 profile, REALITY target/SNI learn.microsoft.com, Firefox
+fingerprint on the host/client, native WARP and the same fail-closed guards.
+Original node/host identities and shared profile were preserved; 104 pilot
+was not altered. Root access and ordinary routing remain unchanged.
+
+Real VLESS/REALITY client with Firefox connected. Selected temporary trace
+traffic exited as 104.28.211.192 (warp=on, FR); ordinary traffic returned
+95.182.88.203. Stop/restart failure isolation and IPv6 guard checks passed.
+The temporary trace selector was removed. Gemini HTML had no country refusal;
+the owner still needs to check their actual account through the reachable link.
+No benchmark was run.
+
+Private link: /tmp/infra-warp-95/test-link.txt (approximately 24 hours).
+Private panel backups/state: infra-data/warp-pilot-95 on the test panel host.
+Panel rollback: /root/warp-pilot95-rollback.py; it restores original inbound,
+SNI and fingerprint settings and removes only this pilot's added bindings.
+Node backup: /root/warp-pilot-backup on 95.182.88.203.
+Evidence and reusable parameterized copies: /tmp/infra-warp-95.

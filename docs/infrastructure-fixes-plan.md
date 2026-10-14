@@ -156,3 +156,21 @@ No quality benchmarks or remote node operations were run for this correction.
 Evidence: `/tmp/infra-localization-tail/`.
 
 The correction was deployed to the authorized @cridpugbot on 154.86.119.144 after an empty-queue check. Polling startup and exact deployed source/locale hashes were verified; production was untouched.
+
+## Gemini inbound implementation, 2026-10-15
+
+- [x] Replace full-profile forks with an in-place sibling of the selected inbound.
+- [x] Preserve original tags/UUIDs, inherited routing and client connection settings.
+- [x] Add host selection, per-host operation state, persisted selection on queue/retry/SSH resume.
+- [x] Replace one active inbound rather than enabling two same-port listeners.
+- [x] Guard shared hosts/inbounds and concurrent panel selection edits.
+- [x] Verify API 2.8.1 and 3.4.5 profile update/enable/disable/reuse/rollback contracts.
+- [x] Verify real REALITY clients and per-inbound Google routing on the isolated 3.x core.
+
+Existing whole-profile modifier compatibility was explicitly excluded by the owner,
+since that feature has not been deployed to production.
+
+Final validation: 177 tests passed. The test-bot deployment matched local source
+hashes, RU/EN handler smoke checks against the actual panel passed, the queue
+remained empty, and disposable core/panel fixtures were cleaned up. Details and
+boundaries are in `docs/infrastructure-acceptance-log.md` under 2026-10-15.

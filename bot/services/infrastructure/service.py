@@ -100,7 +100,7 @@ class InfrastructureService:
         return (await session.execute(select(Deployment).where(Deployment.node_id == node_id,
             Deployment.state == 'active').order_by(Deployment.id.desc()).limit(1))).scalar_one_or_none()
 
-    async def enqueue(self, session, node, deployment, kind, admin_id):
+    async def enqueue(self, session, node, deployment, kind, admin_id, host_uuid=None):
         if kind == 'provision' and deployment.state in {'replaced', 'superseded'}:
             raise ValueError('Этот VPS уже заменён. Используйте текущую карточку ноды.')
         # Serialize enqueues with replacement: measurements may wait, but a
@@ -115,6 +115,9 @@ class InfrastructureService:
         job = Job(node_id=node.id, deployment_id=deployment.id, kind=kind, requested_by=admin_id)
         session.add(job)
         await session.flush()
+        if kind.startswith('gemini_') and host_uuid:
+            await app_settings_dal.upsert_setting(session,
+                f'infra.gemini.job.{self.scope}.{job.id}', host_uuid, updated_by=admin_id)
         return job
 
     async def schedule_key_updates(self, session, admin_id):

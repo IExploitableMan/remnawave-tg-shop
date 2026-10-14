@@ -362,3 +362,48 @@ The original 95.* pilot remains available. Source scripts/evidence are in local
 `/tmp/infra-live-audit`; server fixture snapshots are in
 `/opt/infra-upgrade-20261014` and
 `/opt/remnawave-panel-acceptance/infra-data/live-audit-20261014`.
+
+## Gemini moved into the existing profile, 2026-10-15
+
+The owner requested an inbound sibling rather than a complete profile fork and
+explicitly excluded migration of old fork-profile installations (none were
+released to production). The implementation now appends one `-GEMINI` inbound,
+retains the original tags/UUIDs, and switches only the selected host and one active
+inbound of the node. It never activates the original and same-port sibling together.
+
+| Check | Actual execution and observation | Result |
+| --- | --- | --- |
+| Local regression suite | Docker Python 3.12, temporary PostgreSQL database, Alembic upgrade; 177 tests, no skips | PASS |
+| API 2.8.1 | Isolated legacy panel: in-place profile PATCH; original profile/inbound UUIDs retained; second host unchanged; enable/disable/reuse and injected host-PATCH failure compensation | PASS |
+| API 3.4.5 | Independent isolated panel: the same contracts; no additional profile created | PASS |
+| Real core baseline | Separate official node container, Xray 26.7.28; two REALITY listeners on 24443/24444; authenticated client exit IP 154.86.119.144 and Google HTTP 204 through both | PASS |
+| Per-inbound route | The same unchanged REALITY client JSON files after enable: selected Google traffic logged as `GEMINI -> psiphon-out`; second inbound remained `DIRECT`; non-Google trace remained direct | PASS |
+| Real disable | Same clients and ports continued working; selected Google traffic returned to `DIRECT`; second host binding unchanged | PASS |
+| Real compensation | Injected selected-host PATCH failure after node switch; node/host restored; both original client files worked afterwards | PASS |
+| Independent modifiers | Unit tests enable two hosts with distinct inbounds, preserve shared inherited rule semantics and disable each without replacing the other's active inbound | PASS |
+| Panel edits during setup | A concurrent active-inbound edit cancels switching rather than overwriting the edit; disable preserves later unrelated active-inbound additions | PASS |
+| Queue/SSH resume | Selected host survives a new DB session and the missing-SSH wizard; retry retains selection | PASS |
+| Test-bot UI | Actual deployed service/DB/panel queried through RU and EN handler calls with mocked Telegram message delivery; host/inbound displayed, actionable button and bottom Back verified | PASS |
+| Deployment | @cridpugbot on 154.86.119.144, empty queue before/after, all five deployed source/locale hashes matched, running with restart count zero; administrator 1772118100 retained | PASS |
+
+The isolated core used a temporary pinned SSH forwarding container to the existing
+loopback-only Psiphon on 104.252.89.173. The SSH/Ansible installer itself was not
+changed or rerun in this audit. These are small authenticated HTTP/routing checks,
+not speed/IP-quality/benchmark suites. No Google-account login was repeated, and
+no claim of uninterrupted existing TCP sessions is made: switching reloads the core.
+API-only cases bypassed connection polling on deliberately unreachable fixture
+nodes; actual core connectivity was checked separately on the isolated 3.x node.
+
+Evidence is retained privately at `/opt/gemini-inbound-audit-20261015` on the test
+panel server; local runners/results are in `/tmp/panel-access`. Fixtures are
+labelled AuditInbound/AuditCore15. The primary panel, bot, existing nodes and HTTPS
+browser tunnel were not used as disposable fixtures. Final cleanup details follow.
+
+Final cleanup completed: deleted the disposable core user, both hosts, node, squad
+and profile; removed all four owned core/client/SSH-forwarding containers. Both
+isolated panel containers were stopped and their original node addresses restored
+from private snapshots; the 3.x sandbox DB/Redis were returned to their previous
+stopped state. No test listeners remain on 24443/24444/24500/24501. The temporary
+forwarding password and node secret env file were removed. Main bot polling was
+observed after deployment, with no startup error lines and restart count zero.
+The main panel, existing nodes and the previously shared HTTPS tunnel remain up.

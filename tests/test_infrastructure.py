@@ -11,8 +11,8 @@ from bot.services.panel_infrastructure_api import PanelInfrastructureApi
 from bot.services.infrastructure.reports import aggregate, render_reports
 from bot.services.infrastructure.report_data import parse_result, result_measurements
 from bot.services.infrastructure.gemini import (
-    GOOGLE_DOMAINS, create_or_reuse_gemini_profile, has_gemini_routes,
-    modified_profile_name, prepare_gemini_config,
+    GOOGLE_DOMAINS, create_or_reuse_gemini_inbound, has_gemini_routes,
+    modified_inbound_tag, prepare_gemini_config,
 )
 
 
@@ -114,28 +114,22 @@ class InfrastructureTests(unittest.IsolatedAsyncioTestCase):
             prepare_gemini_config(source, 'vless')
 
     def test_modifier_suffixes_are_stable_and_alphabetical(self):
-        self.assertEqual(modified_profile_name('Default-Profile', ['GEMINI', 'ADOBE']),
-                         'Default-Profile-ADOBE-GEMINI')
+        self.assertEqual(modified_inbound_tag('vless-443', ['GEMINI', 'ADOBE']),
+                         'vless-443-ADOBE-GEMINI')
 
-    async def test_gemini_profile_reuses_only_a_matching_existing_modifier(self):
+    async def test_gemini_inbound_reuses_only_a_matching_existing_modifier(self):
         source_config = {'inbounds': [{'tag': 'vless-443'}], 'outbounds': [
-            {'tag': 'DIRECT', 'protocol': 'freedom'},
-            {'tag': 'BLOCK', 'protocol': 'blackhole', 'settings': {}}], 'routing': {'rules': []}}
+            {'tag': 'DIRECT', 'protocol': 'freedom'}, {'tag': 'BLOCK', 'protocol': 'blackhole', 'settings': {}}],
+            'routing': {'rules': []}}
         updated, tag = prepare_gemini_config(source_config, 'vless-443')
-        source = {'uuid': 'source', 'name': 'Default-Profile', 'config': source_config,
-                  'inbounds': [{'uuid': 'source-in', 'tag': 'vless-443'}]}
-        modified = {'uuid': 'gemini', 'name': 'Default-Profile-GEMINI', 'config': updated,
-                    'inbounds': [{'uuid': 'gemini-in', 'tag': tag}]}
-        api = SimpleNamespace(
-            profiles=AsyncMock(return_value=[modified]),
-            call=AsyncMock(side_effect=lambda method, path, payload=None:
-                source if path == '/config-profiles/source' else modified),
-        )
-        result, source_tag, modified_tag, inbound_uuid = await create_or_reuse_gemini_profile(
-            api, 'source', 'source-in')
-        self.assertEqual((result['uuid'], source_tag, modified_tag, inbound_uuid),
-                         ('gemini', 'vless-443', tag, 'gemini-in'))
-        self.assertFalse(any(call.args[0] == 'POST' for call in api.call.await_args_list))
+        profile = {'uuid': 'source', 'name': 'Default-Profile', 'config': updated,
+            'inbounds': [{'uuid': 'source-in', 'tag': 'vless-443'}, {'uuid': 'gemini-in', 'tag': tag}]}
+        api = SimpleNamespace(call=AsyncMock(return_value=profile))
+        result, source_tag, modified_tag, inbound_uuid = await create_or_reuse_gemini_inbound(api, 'source', 'source-in')
+        self.assertEqual((result['uuid'], source_tag, modified_tag, inbound_uuid), ('source', 'vless-443', tag, 'gemini-in'))
+        self.assertTrue(all(call.args[0] == 'GET' for call in api.call.await_args_list))
+        self.assertEqual(updated['inbounds'][0], source_config['inbounds'][0])
+        self.assertEqual(len(updated['inbounds']), 2)
 
     async def test_completed_diagnostic_checkpoint_renders_without_contacting_vps(self):
         import json

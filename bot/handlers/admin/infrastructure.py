@@ -90,14 +90,6 @@ async def card(callback, service, session, node_id):
         tg_visible, tg_hosts = await service.tg_host_access(session, node)
         text_value += (tr('infra_tg_access') + tr('infra_not_excluded' if tg_visible else 'infra_excluded')
             if tg_visible is not None else '\n' + tr('infra_tg_choose_host'))
-    gemini_row = await app_settings_dal.get_setting(session, f'infra.gemini.{service.scope}.{node.id}')
-    gemini_state = json.loads(gemini_row.value) if gemini_row and gemini_row.value else {}
-    gemini_enabled = bool(gemini_state.get('enabled') and deployment
-        and gemini_state.get('gemini_profile_uuid') == deployment.profile_uuid
-        and gemini_state.get('gemini_inbound_uuid') == deployment.inbound_uuid)
-    gemini_revert_available = bool(gemini_state.get('base_profile_uuid') and gemini_state.get('base_inbound_uuid'))
-    if gemini_enabled and not gemini_revert_available:
-        text_value += tr('infra_gemini_panel_selected')
     buttons = [(tr('infra_extend'), f'infra:extend:{node.id}'), (tr('infra_replace'), f'infra:replace:{node.id}'),
                (tr('infra_credentials'), f'infra:credentials:{node.id}'),
                (tr('infra_save_access'), f'infra:access:{node.id}'), (tr('infra_diagnostics'), f'infra:tests:{node.id}'),
@@ -107,9 +99,7 @@ async def card(callback, service, session, node_id):
                (tr('infra_change_sni'), f'infra:sni:{node.id}'), (tr('infra_delete'), f'infra:delete:{node.id}')] + back()
     if config['tg_squad_uuid']:
         buttons.insert(-1, (tr('infra_tg_hide' if tg_visible else 'infra_tg_show') if tg_visible is not None else tr('infra_tg_choose_host'), f'infra:tg_toggle:{node.id}'))
-    if not gemini_enabled or gemini_revert_available:
-        buttons.insert(-6, (tr('infra_gemini_disable' if gemini_enabled else 'infra_gemini_enable'),
-            f"infra:gemini_{'disable' if gemini_enabled else 'enable'}:{node.id}"))
+    buttons.insert(-6, (tr('infra_gemini_settings'), f'infra:gemini:{node.id}'))
     await show(callback, text_value, buttons)
 
 
@@ -288,7 +278,7 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
     elif action in {'setting', 'profiles', 'squads', 'squad', 'pool', 'inbound'}: target = 'infra:settings'
     elif action == 'profile': target = 'infra:profiles'
     elif action in {'addkey', 'sync_keys'}: target = 'infra:keys'
-    elif action in {'tests', 'test', 'restart', 'upgrade', 'extend', 'access', 'edit', 'sni', 'credentials', 'delete', 'reports', 'history', 'upgrade_confirm', 'gemini_enable', 'gemini_disable'}:
+    elif action in {'tests', 'test', 'restart', 'upgrade', 'extend', 'access', 'edit', 'sni', 'credentials', 'delete', 'reports', 'history', 'upgrade_confirm', 'gemini_enable', 'gemini_disable', 'gemini', 'gemini_host'}:
         target = f'infra:node:{argument}'
     elif action in {'job', 'cancel', 'retry'}: target = 'infra:jobs'
     if action == 'job' and len(parts) > 4 and parts[3] == 'queue':
@@ -594,13 +584,46 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
                     text_value += '\n' + tr('infra_version_refresh_hint')
                 buttons.append((tr('infra_refresh'), f'infra:upgrade:{node.id}'))
                 await show(callback, text_value, buttons + back())
+        elif action in {'gemini', 'gemini_host'}:
+            from bot.services.infrastructure.gemini import linked_hosts, read_gemini_state
+            node = await service.node(session, argument)
+            hosts = linked_hosts(await service.api.call('GET', '/hosts') or [], node.panel_uuid)
+            host_uuid = parts[3] if len(parts) > 3 else None
+            if action == 'gemini' and len(hosts) != 1:
+                if not hosts:
+                    raise ValueError(tr('infra_tg_no_host'))
+                await show(callback, tr('infra_gemini_choose_host'), [
+                    (h.get('remark') or h.get('address') or h['uuid'], f"infra:gemini_host:{node.id}:{h['uuid']}")
+                    for h in hosts] + back(f'infra:node:{node.id}'))
+                return
+            host = next((h for h in hosts if h['uuid'] == host_uuid), None) if host_uuid else hosts[0]
+            if not host:
+                raise ValueError(tr('infra_tg_no_host'))
+            binding = host.get('inbound') or {}
+            inbounds = await service.panel.get_inbounds_by_profile_uuid(binding.get('configProfileUuid'), refresh=True) or []
+            inbound = next((i for i in inbounds if i['uuid'] == binding.get('configProfileInboundUuid')), None)
+            if not inbound:
+                raise ValueError(tr('infra_profile_missing'))
+            enabled = 'gemini' in str(inbound.get('tag', '')).casefold()
+            _key, saved = await read_gemini_state(service, session, node, host['uuid'])
+            buttons = []
+            ready = saved.get('enabled') and saved.get('gemini_inbound_uuid') == binding.get('configProfileInboundUuid')
+            if enabled and ready and saved.get('base_inbound_uuid'):
+                buttons.append((tr('infra_gemini_disable'), f"infra:gemini_disable:{node.id}:{host['uuid']}"))
+            elif not enabled or not ready:
+                label = tr('infra_gemini_setup' if enabled else 'infra_gemini_enable')
+                buttons.append((label, f"infra:gemini_enable:{node.id}:{host['uuid']}"))
+            await show(callback, tr('infra_gemini_host_details', p0=html.escape(host.get('remark') or host['address']),
+                p1=html.escape(inbound['tag']), p2=tr('infra_gemini_on' if enabled else 'infra_gemini_off')),
+                buttons + back(f'infra:node:{node.id}'))
         elif action in {'test', 'restart', 'gemini_enable', 'gemini_disable'}:
             node = await service.node(session, argument)
+            host_uuid = parts[3] if action.startswith('gemini_') and len(parts) > 3 else None
             deployment = await service.deployment(session, node.id)
             if not deployment:
                 if action == 'gemini_enable':
                     BACK_TARGET.set(f'infra:node:{node.id}')
-                    await state.update_data(flow='access', node_id=node.id, resume_gemini=True)
+                    await state.update_data(flow='access', node_id=node.id, resume_gemini=True, gemini_host_uuid=host_uuid)
                     await state.set_state(InfrastructureStates.input)
                     await callback.message.answer(tr('infra_ask_ssh_only'), reply_markup=keyboard(back()))
                     return
@@ -609,7 +632,10 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             kind = parts[3] if action == 'test' else action
             if kind not in {'small', 'medium', 'large', 'restart', 'upgrade', 'gemini_enable', 'gemini_disable'}:
                 raise ValueError(tr('infra_unknown_action'))
-            job = await service.enqueue(session, node, deployment, kind, callback.from_user.id)
+            if kind.startswith('gemini_'):
+                job = await service.enqueue(session, node, deployment, kind, callback.from_user.id, host_uuid=host_uuid)
+            else:
+                job = await service.enqueue(session, node, deployment, kind, callback.from_user.id)
             await session.commit()
             await publish_job(service, job.id)
             await show(callback, tr('infra_operation_added', p0=html.escape(node.name)), back())
@@ -674,7 +700,12 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
                     if deployment.state != 'active':
                         raise ValueError(tr('infra_deployment_replaced'))
                     await service.validate_deployment(session, node, deployment)
-                new_job = await service.enqueue(session, node, deployment, job.kind, callback.from_user.id)
+                if job.kind.startswith('gemini_'):
+                    from bot.services.infrastructure.gemini import job_host_uuid
+                    host_uuid = await job_host_uuid(service, session, node, job.id)
+                    new_job = await service.enqueue(session, node, deployment, job.kind, callback.from_user.id, host_uuid=host_uuid)
+                else:
+                    new_job = await service.enqueue(session, node, deployment, job.kind, callback.from_user.id)
                 if job.kind in {'medium', 'large'} and job.status != 'done':
                     source = Path(settings.INFRA_ARTIFACT_DIR) / 'reports' / str(job.id) / 'results.json'
                     if source.exists():
@@ -847,7 +878,7 @@ async def infrastructure_input(message: types.Message, state: FSMContext, sessio
             await service.publish_snapshots()
             await message.answer(tr('infra_credentials_saved', p0=html.escape(fingerprint)))
             if data.get('resume_gemini'):
-                job = await service.enqueue(session, node, deployment, 'gemini_enable', message.from_user.id)
+                job = await service.enqueue(session, node, deployment, 'gemini_enable', message.from_user.id, host_uuid=data.get('gemini_host_uuid'))
                 await session.commit()
                 await publish_job(service, job.id)
                 await message.answer(tr('infra_operation_added', p0=html.escape(node.name)))

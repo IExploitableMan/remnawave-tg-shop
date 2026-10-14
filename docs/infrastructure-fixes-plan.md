@@ -174,3 +174,19 @@ Final validation: 177 tests passed. The test-bot deployment matched local source
 hashes, RU/EN handler smoke checks against the actual panel passed, the queue
 remained empty, and disposable core/panel fixtures were cleaned up. Details and
 boundaries are in `docs/infrastructure-acceptance-log.md` under 2026-10-15.
+
+## Panel bridges stack preparation, 2026-10-15
+
+- [x] Stack bridges on the updated infrastructure branch; retain both tg and Gemini menus plus bridge configuration.
+- [x] Preserve bridge job payload and Gemini host selection when retrying.
+- [x] Use the API 2.x/3.x config-profile PATCH contract and retain unrelated active inbounds.
+- [x] Preserve Gemini when switching to a wildcard inbound; keep sibling SNI lists consistent.
+- [x] Register direct/bridge companion hosts and switch their shared backend listener together.
+- [x] Guard REALITY compatibility and retain existing SNI/squad entries during compensation.
+- [ ] Run the combined suite and new regression cases (explicitly deferred by the owner).
+- [ ] Validate real HAProxy/Gemini combinations, reconnect/rollback and bridge node lifecycle/visibility before merging.
+
+Existing stack: PR #2 (infrastructure -> main), PR #3 (bridges -> infrastructure).
+The bridge preparation is kept in the bridge branch; it has not been deployed to
+the server. The earlier 177-test/REALITY evidence applies to the infrastructure
+branch, not these subsequent bridge integration changes.

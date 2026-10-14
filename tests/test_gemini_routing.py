@@ -209,6 +209,39 @@ class GeminiRoutingTests(unittest.IsolatedAsyncioTestCase):
         config['routing']['rules'].pop(0)
         next(o for o in config['outbounds'] if o['tag'] == 'BLOCK')['protocol'] = 'freedom'
         self.assertFalse(has_gemini_routes(config, tag))
+    async def test_registered_bridge_pair_switches_together_from_either_host(self):
+        self.node.host_uuid = 'host'
+        self.api.other_hosts = [dict(copy.deepcopy(self.api.host), uuid='bridge', address='bridge.example.net')]
+        self.state['infra.bridge.scope.1'] = json.dumps({'direct_host_uuid': 'host', 'bridge_host_uuid': 'bridge'})
+        await apply_gemini_route(self.service, self.session, self.node, SimpleNamespace(), {}, 1, 111)
+        self.assertEqual(self.api.host['inbound'], self.api.other_hosts[0]['inbound'])
+        self.assertEqual(self.api.host['inbound']['configProfileInboundUuid'], 'new-selected-GEMINI')
+        self.assertTrue(json.loads(self.state['infra.gemini.scope.1.bridge'])['enabled'])
+        self.state['infra.gemini.job.scope.2'] = 'bridge'
+        await remove_gemini_route(self.service, self.session, self.node, 2, 111)
+        self.assertEqual(self.api.host['inbound']['configProfileInboundUuid'], 'selected-id')
+        self.assertEqual(self.api.host['inbound'], self.api.other_hosts[0]['inbound'])
+        self.assertFalse(json.loads(self.state['infra.gemini.scope.1.host'])['enabled'])
+
+    async def test_second_bridge_host_failure_rolls_back_both_bindings(self):
+        self.node.host_uuid = 'host'
+        self.api.other_hosts = [dict(copy.deepcopy(self.api.host), uuid='bridge', address='bridge.example.net')]
+        self.state['infra.bridge.scope.1'] = json.dumps({'direct_host_uuid': 'host', 'bridge_host_uuid': 'bridge'})
+        before_node, before_hosts = copy.deepcopy(self.api.node), copy.deepcopy([self.api.host] + self.api.other_hosts)
+        original_call = self.api.call
+        failed = False
+        async def call(method, path, payload=None):
+            nonlocal failed
+            if method == 'PATCH' and path == '/hosts' and payload['uuid'] == 'bridge' and not failed:
+                failed = True
+                raise RuntimeError('injected companion failure')
+            return await original_call(method, path, payload)
+        self.api.call = call
+        with self.assertRaisesRegex(RuntimeError, 'injected companion'):
+            await apply_gemini_route(self.service, self.session, self.node, SimpleNamespace(), {}, 1, 111)
+        self.assertEqual(self.api.node, before_node)
+        self.assertEqual([self.api.host] + self.api.other_hosts, before_hosts)
+
 
 
 class GeminiConnectionTests(unittest.IsolatedAsyncioTestCase):

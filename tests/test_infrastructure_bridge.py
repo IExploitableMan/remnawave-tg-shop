@@ -29,7 +29,8 @@ class FakeBridgePanel:
             'inbounds': ([{'uuid': 'in-443', 'tag': 'VLESS-443'},
                           {'uuid': 'in-wildcard', 'tag': 'VLESS-WILDCARD'}] if wildcard
                          else [{'uuid': 'in-443', 'tag': 'VLESS-443'}])}
-        self.node = {'uuid': 'node', 'hostUuid': 'direct', 'configProfile': {
+        self.restart_node = AsyncMock()
+        self.node = {'uuid': 'node', 'isConnected': True, 'isConnecting': False, 'hostUuid': 'direct', 'configProfile': {
             'activeConfigProfileUuid': 'profile', 'activeInbounds': ['in-443']}}
         self.hosts = [{'uuid': 'direct', 'address': '203.0.113.1', 'port': 443, 'nodes': ['node'],
                        'remark': 'node1 (DE)',
@@ -46,14 +47,18 @@ class FakeBridgePanel:
         self.order.append(f'{method} {path}')
         if path == '/config-profiles/profile' and method == 'GET':
             return copy.deepcopy(self.profile)
-        if path == '/config-profiles/profile' and method == 'PATCH':
+        if path == '/config-profiles' and method == 'PATCH':
+            previous = {entry['tag']: entry['uuid'] for entry in self.profile['inbounds']}
             self.profile['config'] = copy.deepcopy(payload['config'])
+            self.profile['inbounds'] = [{'tag': entry['tag'], 'uuid': previous.get(entry['tag'], 'in-' + entry['tag'])} for entry in payload['config']['inbounds']]
             return {}
+        if path == '/internal-squads' and method == 'GET':
+            return {'internalSquads': []}
         if path == '/hosts' and method == 'GET':
             self.get_hosts_calls += 1
             hosts = copy.deepcopy(self.hosts)
             # Verification reads hosts last; earlier reads must see real data.
-            if self.strip_host_sni and self.get_hosts_calls >= 4:
+            if self.strip_host_sni and self.get_hosts_calls >= 7:
                 for host in hosts:
                     host.pop('sni', None)
             return hosts
@@ -86,7 +91,13 @@ class BridgeCreationTests(unittest.IsolatedAsyncioTestCase):
         self.deployment = SimpleNamespace(id=5, address='203.0.113.1',
             profile_uuid='profile', inbound_uuid='in-443')
         self.saved = SimpleNamespace(profile_uuid=None, inbound_uuid=None)
-        self.service = SimpleNamespace(api=self.api, factory=self.fake_factory)
+        self.service = SimpleNamespace(api=self.api, factory=self.fake_factory, scope='bridge-test')
+        self.persisted = {}
+        async def save(session, key, value, **kwargs): self.persisted[key] = value
+        for patcher in [patch('db.dal.app_settings_dal.upsert_setting', new=AsyncMock(side_effect=save)),
+                patch('bot.services.infrastructure.bridge.verify_connected', new=AsyncMock())]:
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.ansible_calls = []
 
     def fake_factory(self):
@@ -101,7 +112,7 @@ class BridgeCreationTests(unittest.IsolatedAsyncioTestCase):
             self.api.order.append(f'ansible {state}')
         with patch('bot.services.infrastructure.provisioning.ansible_bridge', new=fake_ansible), \
              patch('bot.services.infrastructure.provisioning.stage', new=AsyncMock()) as staged:
-            await create_bridge(self.service, SimpleNamespace(panel_uuid='node', name='node1 (DE)'),
+            await create_bridge(self.service, SimpleNamespace(id=1, panel_uuid='node', name='node1 (DE)', host_uuid='direct'),
                 self.deployment, dict(BRIDGE_CONFIG), 1, sni)
         return staged
 
@@ -118,13 +129,13 @@ class BridgeCreationTests(unittest.IsolatedAsyncioTestCase):
     async def test_switches_node_and_host_to_wildcard_in_order(self):
         await self.run_bridge()
         # The wildcard profile accepted the SNI, then the node switched, then haproxy, then the host.
-        self.assertLess(self.api.order.index('PATCH /config-profiles/profile'),
+        self.assertLess(self.api.order.index('PATCH /config-profiles'),
                         self.api.order.index('POST /nodes/bulk-actions/profile-modification'))
         self.assertLess(self.api.order.index('POST /nodes/bulk-actions/profile-modification'),
                         self.api.order.index('ansible present'))
         self.assertLess(self.api.order.index('ansible present'),
                         self.api.order.index('POST /hosts'))
-        self.assertEqual(self.server_names(), ['cdn.google.com', 'dl.google.com'])
+        self.assertEqual(self.server_names(), ['cdn.google.com', 'dl.google.com', 'www.google.com'])
         self.assertEqual(self.server_names('VLESS-443'), ['www.google.com'])
         self.assertEqual(self.api.node['configProfile']['activeInbounds'], ['in-wildcard'])
         self.assertEqual(self.direct_host()['inbound'],
@@ -138,6 +149,36 @@ class BridgeCreationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge['remark'], 'node1 (DE) bridge')
         # The node card follows the wildcard inbound the node now serves.
         self.assertEqual((self.saved.profile_uuid, self.saved.inbound_uuid), ('profile', 'in-wildcard'))
+
+    async def test_bridge_keeps_unrelated_active_inbound_and_host(self):
+        self.api.profile['config']['inbounds'].append({'tag': 'OTHER', 'port': 8443})
+        self.api.profile['inbounds'].append({'tag': 'OTHER', 'uuid': 'other-inbound'})
+        self.api.node['configProfile']['activeInbounds'].append('other-inbound')
+        other = {'uuid': 'other-host', 'nodes': ['node'], 'address': '203.0.113.1', 'port': 8443,
+            'inbound': {'configProfileUuid': 'profile', 'configProfileInboundUuid': 'other-inbound'}}
+        self.api.hosts.append(copy.deepcopy(other))
+        await self.run_bridge()
+        self.assertEqual(self.api.node['configProfile']['activeInbounds'], ['in-wildcard', 'other-inbound'])
+        self.assertEqual(next(h for h in self.api.hosts if h['uuid'] == 'other-host'), other)
+
+    async def test_bridge_preserves_gemini_using_a_wildcard_sibling(self):
+        from bot.services.infrastructure.gemini import prepare_gemini_config, has_gemini_routes
+        config, tag = prepare_gemini_config(self.api.profile['config'], 'VLESS-443')
+        self.api.profile['config'] = config
+        self.api.profile['inbounds'].append({'tag': tag, 'uuid': 'source-gemini'})
+        self.api.node['configProfile']['activeInbounds'] = ['source-gemini']
+        self.api.hosts[0]['inbound']['configProfileInboundUuid'] = 'source-gemini'
+        await self.run_bridge()
+        wildcard_tag = 'VLESS-WILDCARD-GEMINI'
+        target = next(i['uuid'] for i in self.api.profile['inbounds'] if i['tag'] == wildcard_tag)
+        self.assertEqual(self.api.node['configProfile']['activeInbounds'], [target])
+        self.assertTrue(has_gemini_routes(self.api.profile['config'], wildcard_tag))
+        self.assertEqual(self.direct_host()['inbound'], self.bridge_host()['inbound'])
+        self.assertEqual(json.loads(self.persisted['infra.bridge.bridge-test.1'])['direct_host_uuid'], 'direct')
+        for host in ['direct', 'bridge-host']:
+            saved = json.loads(self.persisted[f'infra.gemini.bridge-test.1.{host}'])
+            self.assertEqual(saved['gemini_inbound_uuid'], target)
+            self.assertEqual(saved['base_inbound_uuid'], 'in-wildcard')
 
     async def test_verification_failure_keeps_preexisting_bridge_intact(self):
         # A bridge host with the same SNI already exists (retry after a lost
@@ -180,7 +221,7 @@ class BridgeCreationTests(unittest.IsolatedAsyncioTestCase):
         self.api = FakeBridgePanel(wildcard=False)
         self.service.api = self.api
         with self.assertRaisesRegex(ValueError, 'VLESS-WILDCARD'):
-            await create_bridge(self.service, SimpleNamespace(panel_uuid='node', name='node1 (DE)'),
+            await create_bridge(self.service, SimpleNamespace(id=1, panel_uuid='node', name='node1 (DE)', host_uuid='direct'),
                 self.deployment, dict(BRIDGE_CONFIG), 1, 'dl.google.com')
         self.assertFalse([step for step in self.api.order
                           if step.startswith(('PATCH', 'POST', 'DELETE'))])
@@ -189,7 +230,7 @@ class BridgeCreationTests(unittest.IsolatedAsyncioTestCase):
         self.api.hosts.append({'uuid': 'other-bridge', 'address': 'bridge.example.net',
             'sni': 'fonts.google.com', 'nodes': ['node'], 'remark': 'node1 (DE) bridge'})
         with self.assertRaisesRegex(ValueError, 'уже есть мост'):
-            await create_bridge(self.service, SimpleNamespace(panel_uuid='node', name='node1 (DE)'),
+            await create_bridge(self.service, SimpleNamespace(id=1, panel_uuid='node', name='node1 (DE)', host_uuid='direct'),
                 self.deployment, dict(BRIDGE_CONFIG), 1, 'dl.google.com')
         self.assertEqual(self.api.node['configProfile']['activeInbounds'], ['in-443'])
         self.assertEqual(self.server_names(), ['cdn.google.com'])
@@ -197,11 +238,12 @@ class BridgeCreationTests(unittest.IsolatedAsyncioTestCase):
     async def test_haproxy_failure_restores_wildcard_switch_and_profile(self):
         async def failing_ansible(service, config, sni, backend, state='present'):
             self.api.order.append(f'ansible {state}')
-            raise RuntimeError('injected haproxy failure')
+            if state == 'present':
+                raise RuntimeError('injected haproxy failure')
         with patch('bot.services.infrastructure.provisioning.ansible_bridge', new=failing_ansible), \
              patch('bot.services.infrastructure.provisioning.stage', new=AsyncMock()):
             with self.assertRaisesRegex(RuntimeError, 'injected haproxy failure'):
-                await create_bridge(self.service, SimpleNamespace(panel_uuid='node', name='node1 (DE)'),
+                await create_bridge(self.service, SimpleNamespace(id=1, panel_uuid='node', name='node1 (DE)', host_uuid='direct'),
                     self.deployment, dict(BRIDGE_CONFIG), 1, 'dl.google.com')
         self.assertEqual(self.api.node['configProfile']['activeInbounds'], ['in-443'])
         self.assertEqual(self.direct_host()['inbound'],
@@ -233,12 +275,12 @@ class BridgeCreationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unconfigured_bridge_is_refused_before_any_change(self):
         with self.assertRaisesRegex(ValueError, 'Мост не настроен'):
-            await create_bridge(self.service, SimpleNamespace(panel_uuid='node', name='node1 (DE)'),
+            await create_bridge(self.service, SimpleNamespace(id=1, panel_uuid='node', name='node1 (DE)', host_uuid='direct'),
                                 self.deployment, {'bridge_address': '', 'bridge_host_public_key': ''}, 1, 'dl.google.com')
         self.assertEqual(self.api.order, [])
 
     async def test_host_creation_rejects_taken_sni_and_reuses_own_host(self):
-        node = SimpleNamespace(panel_uuid='node', name='node1 (DE)')
+        node = SimpleNamespace(id=1, panel_uuid='node', name='node1 (DE)', host_uuid='direct')
         self.api.hosts.append({'uuid': 'foreign', 'address': '203.0.113.9',
             'sni': 'fonts.google.com', 'nodes': ['other-node']})
         with self.assertRaisesRegex(ValueError, 'уже используется'):
@@ -247,7 +289,8 @@ class BridgeCreationTests(unittest.IsolatedAsyncioTestCase):
         # A previously created matching host is reused instead of duplicated.
         self.api.hosts = [host for host in self.api.hosts if host['uuid'] != 'foreign']
         self.api.hosts.append({'uuid': 'own-bridge', 'address': 'bridge.example.net',
-            'sni': 'fonts.google.com', 'remark': 'node1 (DE) bridge', 'nodes': ['node']})
+            'sni': 'fonts.google.com', 'remark': 'node1 (DE) bridge', 'nodes': ['node'],
+            'inbound': {'configProfileUuid': 'profile', 'configProfileInboundUuid': 'in-wildcard'}})
         reused, created = await create_bridge_host(self.api, node, 'bridge.example.net',
             'fonts.google.com', 'profile', 'in-wildcard')
         self.assertEqual(reused, 'own-bridge')

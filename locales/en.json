@@ -1032,5 +1032,11 @@
   "infra_gemini_source_unknown": "The original Gemini inbound is unknown; select the source inbound manually in the panel",
   "infra_gemini_core_disconnected": "The node did not reconnect after the Gemini switch",
   "infra_gemini_tag_too_long": "The inbound tag is too long for the GEMINI suffix",
-  "infra_gemini_setup": "🔧 Install / check Psiphon"
+  "infra_gemini_setup": "🔧 Install / check Psiphon",
+  "infra_gemini_bridge_pair": "\nThis switches both the direct host and its bridge: they share one inbound.",
+  "infra_bridge_pair_changed": "The direct and bridge hosts use different inbounds; synchronize their bindings in the panel first",
+  "infra_bridge_incompatible": "The wildcard inbound changes REALITY connection parameters; align the key, shortIds, transport and port before creating a bridge",
+  "infra_bridge_direct_ambiguous": "Cannot select a unique direct host for this node",
+  "infra_bridge_host_mismatch": "The existing bridge host uses a different inbound; synchronize it in the panel",
+  "infra_bridge_same_port": "Another active inbound already uses bridge port 443"
 }

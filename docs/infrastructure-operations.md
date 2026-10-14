@@ -289,3 +289,13 @@ Final checkpoint-count polish: 56 focused infrastructure tests passed, including
 ### Manual tg host visibility
 
 The node card reads the current panel host restrictions and toggles only the configured tg squad. Other squad restrictions, inbound settings and host disabled state remain unchanged. Multiple linked hosts require explicit selection when there is no recorded primary host. Manual hiding is retained on renewal; renewal restores only restrictions saved by the expiry worker. The Excluded Internal Squads property belongs to hosts in Panel API 2.x, and is represented by internalSquads in API 3.x.
+
+### Pending stacked bridge integration
+
+The bridges branch is stacked above this infrastructure change. It keeps bridge
+job payload when retrying, preserves unrelated active inbounds, and records the
+direct host and its bridge as companions sharing one listener. Gemini switches
+both registered companions together; unrelated hosts sharing an inbound are still
+rejected. Bridge creation on a Gemini node uses a wildcard Gemini sibling in the
+same profile and preserves REALITY client parameters. Full combined validation
+and deployment are deferred; see the fixes plan before merging PR #3.

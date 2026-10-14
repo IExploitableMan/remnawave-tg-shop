@@ -1033,5 +1033,11 @@
   "infra_gemini_source_unknown": "Исходный inbound Gemini-маршрута не сохранён; выберите его вручную в панели",
   "infra_gemini_core_disconnected": "Ядро ноды не подключилось после переключения Gemini",
   "infra_gemini_tag_too_long": "Тег inbound слишком длинный для суффикса GEMINI",
-  "infra_gemini_setup": "🔧 Установить / проверить Psiphon"
+  "infra_gemini_setup": "🔧 Установить / проверить Psiphon",
+  "infra_gemini_bridge_pair": "\nПереключение применяется к прямому host и его мосту: у них общий inbound.",
+  "infra_bridge_pair_changed": "Прямой host и host моста используют разные inbounds; сначала синхронизируйте их в панели",
+  "infra_bridge_incompatible": "Wildcard inbound меняет параметры подключения REALITY; согласуйте ключ, shortIds, transport и порт перед созданием моста",
+  "infra_bridge_direct_ambiguous": "Не удалось однозначно выбрать прямой host ноды для моста",
+  "infra_bridge_host_mismatch": "Существующий host моста использует другой inbound; синхронизируйте его в панели",
+  "infra_bridge_same_port": "Другой активный inbound уже использует порт моста 443"
 }

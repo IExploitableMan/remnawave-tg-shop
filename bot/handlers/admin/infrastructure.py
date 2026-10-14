@@ -657,8 +657,12 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             elif not enabled or not ready:
                 label = tr('infra_gemini_setup' if enabled else 'infra_gemini_enable')
                 buttons.append((label, f"infra:gemini_enable:{node.id}:{host['uuid']}"))
+            bridge_row = await app_settings_dal.get_setting(session, f'infra.bridge.{service.scope}.{node.id}')
+            bridge_pair = json.loads(bridge_row.value) if bridge_row and bridge_row.value else {}
+            paired = host['uuid'] in {bridge_pair.get('direct_host_uuid'), bridge_pair.get('bridge_host_uuid')}
             await show(callback, tr('infra_gemini_host_details', p0=html.escape(host.get('remark') or host['address']),
-                p1=html.escape(inbound['tag']), p2=tr('infra_gemini_on' if enabled else 'infra_gemini_off')),
+                p1=html.escape(inbound['tag']), p2=tr('infra_gemini_on' if enabled else 'infra_gemini_off'))
+                + (tr('infra_gemini_bridge_pair') if paired else ''),
                 buttons + back(f'infra:node:{node.id}'))
         elif action in {'test', 'restart', 'gemini_enable', 'gemini_disable'}:
             node = await service.node(session, argument)

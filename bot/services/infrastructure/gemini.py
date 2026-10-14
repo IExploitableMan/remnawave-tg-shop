@@ -291,9 +291,42 @@ async def read_gemini_state(service, session, node, host_uuid):
     return key, {}
 
 
-async def check_other_hosts(api, node_uuid, host_uuid, profile_uuid, inbound_uuid):
+async def listener_host_group(service, session, node, host, profile_uuid, inbound_uuid):
+    """A registered bridge companion shares the same backend listener as its direct host."""
+    from db.dal import app_settings_dal
+    row = await app_settings_dal.get_setting(session, f'infra.bridge.{service.scope}.{node.id}')
+    bridge = json.loads(row.value) if row and row.value else {}
+    pair = {bridge.get('direct_host_uuid'), bridge.get('bridge_host_uuid')} - {None}
+    hosts = linked_hosts(await service.api.call('GET', '/hosts') or [], node.panel_uuid)
+    group = [host]
+    if host['uuid'] in pair:
+        for companion in hosts:
+            if companion['uuid'] != host['uuid'] and companion['uuid'] in pair:
+                if (companion.get('inbound') or {}) != host.get('inbound'):
+                    raise ValueError('Прямой host и host моста используют разные inbounds; сначала синхронизируйте их в панели')
+                group.append(companion)
+    await check_other_hosts(service.api, node.panel_uuid, host['uuid'], profile_uuid, inbound_uuid,
+        allowed_host_uuids=[item['uuid'] for item in group])
+    return group
+
+
+async def verify_host_group(api, hosts, expected_binding):
+    current = {host['uuid']: host for host in await api.call('GET', '/hosts') or []}
+    if any((current.get(host['uuid']) or {}).get('inbound') != expected_binding for host in hosts):
+        raise RuntimeError('Панель не подтвердила переключение пары host и моста')
+
+
+async def save_host_group_state(service, session, node, hosts, state, admin_id):
+    from db.dal import app_settings_dal
+    for host in hosts:
+        value = dict(state, host_uuid=host['uuid'], host_uuids=[item['uuid'] for item in hosts])
+        await app_settings_dal.upsert_setting(session,
+            f'infra.gemini.{service.scope}.{node.id}.{host["uuid"]}', json.dumps(value), updated_by=admin_id)
+
+
+async def check_other_hosts(api, node_uuid, host_uuid, profile_uuid, inbound_uuid, allowed_host_uuids=()):
     hosts = linked_hosts(await api.call('GET', '/hosts') or [], node_uuid)
-    if any(h['uuid'] != host_uuid and (h.get('inbound') or {}) == {
+    if any(h['uuid'] != host_uuid and h['uuid'] not in allowed_host_uuids and (h.get('inbound') or {}) == {
             'configProfileUuid': profile_uuid, 'configProfileInboundUuid': inbound_uuid} for h in hosts):
         raise ValueError('Другой host этой ноды использует тот же inbound; создайте для него отдельный inbound перед переключением')
 
@@ -348,6 +381,7 @@ async def apply_gemini_route(service, session, node, deployment, config, job_id,
     active_tag = active_inbound.get('tag') if active_inbound else None
     if not active_tag:
         raise ValueError('Не удалось определить tag активного inbound в профиле')
+    group = await listener_host_group(service, session, node, host, original_profile, selected_id)
     if 'gemini' in active_tag.casefold():
         source_config = parse_config(source.get('config'))
         actual_tag = active_tag
@@ -355,7 +389,8 @@ async def apply_gemini_route(service, session, node, deployment, config, job_id,
             raise ValueError('У выбранного в панели Gemini inbound не найден подтверждённый TCP-маршрут Google через Psiphon')
         await stage(service, job_id, 'psiphon')
         await ansible(service, deployment, config, kind='gemini')
-        await assert_selection_unchanged(api, panel_node, host)
+        for member in group:
+            await assert_selection_unchanged(api, panel_node, member)
         await verify_connected(api, node.panel_uuid)
         key, saved = await read_gemini_state(service, session, node, host['uuid'])
         state = dict(saved, host_uuid=host['uuid'], enabled=True, gemini_profile_uuid=original_profile,
@@ -370,12 +405,11 @@ async def apply_gemini_route(service, session, node, deployment, config, job_id,
                     base_host_inbound={'configProfileUuid': original_profile, 'configProfileInboundUuid': base['uuid']},
                     base_inbound_uuids=[base['uuid'] if identifier == selected_id else identifier for identifier in original_inbounds])
         state['panel_selected'] = not bool(state.get('base_inbound_uuid'))
-        await app_settings_dal.upsert_setting(session, key, json.dumps(state), updated_by=admin_id)
+        await save_host_group_state(service, session, node, group, state, admin_id)
         await session.commit()
         await stage(service, job_id, 'gemini_done')
         return
 
-    await check_other_hosts(api, node.panel_uuid, host['uuid'], original_profile, selected_id)
     await stage(service, job_id, 'psiphon')
     await ansible(service, deployment, config, kind='gemini')
 
@@ -393,18 +427,22 @@ async def apply_gemini_route(service, session, node, deployment, config, job_id,
             if other.get('port') == expected_tag.get('port') and other.get('listen', '0.0.0.0') == expected_tag.get('listen', '0.0.0.0'):
                 raise ValueError('Другой активный inbound слушает тот же адрес и порт; переключение отменено')
     changed_squads = []
-    switched_node = switched_host = False
+    switched_node = False
+    switched_hosts = []
     try:
         for old_id, new_id in zip(original_inbounds, target_inbounds):
             changes = await add_inbound_to_squads(api, old_id, new_id)
             changed_squads.append({'original_uuid': old_id, 'new_uuid': new_id, 'changes': changes})
-        await assert_selection_unchanged(api, panel_node, host)
+        for member in group:
+            await assert_selection_unchanged(api, panel_node, member)
         await stage(service, job_id, 'gemini_switch')
         switched_node = True
         await switch_profile(api, node.panel_uuid, profile['uuid'], target_inbounds)
-        switched_host = True
-        await api.call('PATCH', '/hosts', {'uuid': host['uuid'], 'inbound': {
-            'configProfileUuid': profile['uuid'], 'configProfileInboundUuid': target_inbound}})
+        for member in group:
+            switched_hosts.append(member)
+            await api.call('PATCH', '/hosts', {'uuid': member['uuid'], 'inbound': {
+                'configProfileUuid': profile['uuid'], 'configProfileInboundUuid': target_inbound}})
+        await verify_host_group(api, group, {'configProfileUuid': profile['uuid'], 'configProfileInboundUuid': target_inbound})
         current_node, current_host = await _panel_node_host(api, node.panel_uuid, host['uuid'])
         if ((current_node.get('configProfile') or {}).get('activeConfigProfileUuid') != profile['uuid']
                 or set(active_inbound_ids(current_node)) != set(target_inbounds)
@@ -418,16 +456,15 @@ async def apply_gemini_route(service, session, node, deployment, config, job_id,
             'base_host_inbound': original_host_inbound, 'gemini_profile_uuid': profile['uuid'],
             'gemini_inbound_uuid': target_inbound, 'source_tag': source_tag,
             'gemini_tag': modified_tag, 'squads': changed_squads, 'enabled': True}
-        await app_settings_dal.upsert_setting(session, f'infra.gemini.{service.scope}.{node.id}.{host['uuid']}',
-            json.dumps(state), updated_by=admin_id)
+        await save_host_group_state(service, session, node, group, state, admin_id)
         await session.commit()
         await stage(service, job_id, 'gemini_done')
     except BaseException as original_error:
         # Compensate in reverse order. Keep the inactive sibling for a safe retry.
         rollback_errors = []
         try:
-            if switched_host and original_host_inbound:
-                await api.call('PATCH', '/hosts', {'uuid': host['uuid'], 'inbound': original_host_inbound})
+            for member in reversed(switched_hosts):
+                await api.call('PATCH', '/hosts', {'uuid': member['uuid'], 'inbound': member['inbound']})
         except Exception as exc:
             rollback_errors.append(exc)
         try:
@@ -466,17 +503,21 @@ async def remove_gemini_route(service, session, node, job_id, admin_id):
             or old_host_inbound != {'configProfileUuid': state['gemini_profile_uuid'],
                                     'configProfileInboundUuid': state['gemini_inbound_uuid']}):
         raise ValueError('Нода или host вручную изменены в панели после включения Gemini; сначала синхронизируйте панель')
-    await check_other_hosts(api, node.panel_uuid, host['uuid'], live_profile, state['gemini_inbound_uuid'])
+    group = await listener_host_group(service, session, node, host, live_profile, state['gemini_inbound_uuid'])
     original_inbounds = list(dict.fromkeys(state['base_inbound_uuid'] if identifier == state['gemini_inbound_uuid']
         else identifier for identifier in live_inbounds))
-    await assert_selection_unchanged(api, panel_node, host)
+    for member in group:
+        await assert_selection_unchanged(api, panel_node, member)
     await stage(service, job_id, 'gemini_switch')
-    switched_node = switched_host = False
+    switched_node = False
+    switched_hosts = []
     try:
         switched_node = True
         await switch_profile(api, node.panel_uuid, state['base_profile_uuid'], original_inbounds)
-        switched_host = True
-        await api.call('PATCH', '/hosts', {'uuid': host['uuid'], 'inbound': state['base_host_inbound']})
+        for member in group:
+            switched_hosts.append(member)
+            await api.call('PATCH', '/hosts', {'uuid': member['uuid'], 'inbound': state['base_host_inbound']})
+        await verify_host_group(api, group, state['base_host_inbound'])
         checked_node, checked_host = await _panel_node_host(api, node.panel_uuid, host['uuid'])
         if ((checked_node.get('configProfile') or {}).get('activeConfigProfileUuid') != state['base_profile_uuid']
                 or set(active_inbound_ids(checked_node)) != set(original_inbounds)
@@ -485,16 +526,17 @@ async def remove_gemini_route(service, session, node, job_id, admin_id):
         await api.restart_node(node.panel_uuid, force=True)
         await verify_connected(api, node.panel_uuid)
         state['enabled'] = False
-        await app_settings_dal.upsert_setting(session, key, json.dumps(state), updated_by=admin_id)
-        await app_settings_dal.upsert_setting(session,
-            f'infra.gemini.detected.{service.scope}.{node.id}.{host["uuid"]}', '', updated_by=admin_id)
+        await save_host_group_state(service, session, node, group, state, admin_id)
+        for member in group:
+            await app_settings_dal.upsert_setting(session,
+                f'infra.gemini.detected.{service.scope}.{node.id}.{member["uuid"]}', '', updated_by=admin_id)
         await session.commit()
         await stage(service, job_id, 'gemini_done')
     except BaseException as original_error:
         rollback_errors = []
         try:
-            if switched_host and old_host_inbound:
-                await api.call('PATCH', '/hosts', {'uuid': host['uuid'], 'inbound': old_host_inbound})
+            for member in reversed(switched_hosts):
+                await api.call('PATCH', '/hosts', {'uuid': member['uuid'], 'inbound': member['inbound']})
         except Exception as exc:
             rollback_errors.append(exc)
         try:

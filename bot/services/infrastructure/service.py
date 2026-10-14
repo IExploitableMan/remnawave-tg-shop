@@ -100,7 +100,7 @@ class InfrastructureService:
         return (await session.execute(select(Deployment).where(Deployment.node_id == node_id,
             Deployment.state == 'active').order_by(Deployment.id.desc()).limit(1))).scalar_one_or_none()
 
-    async def enqueue(self, session, node, deployment, kind, admin_id):
+    async def enqueue(self, session, node, deployment, kind, admin_id, host_uuid=None):
         if kind == 'provision' and deployment.state in {'replaced', 'superseded'}:
             raise ValueError('Этот VPS уже заменён. Используйте текущую карточку ноды.')
         # Serialize enqueues with replacement: measurements may wait, but a
@@ -115,6 +115,9 @@ class InfrastructureService:
         job = Job(node_id=node.id, deployment_id=deployment.id, kind=kind, requested_by=admin_id)
         session.add(job)
         await session.flush()
+        if kind.startswith('gemini_') and host_uuid:
+            await app_settings_dal.upsert_setting(session,
+                f'infra.gemini.job.{self.scope}.{job.id}', host_uuid, updated_by=admin_id)
         return job
 
     async def schedule_key_updates(self, session, admin_id):
@@ -377,8 +380,50 @@ class InfrastructureService:
         await self.restore_host_access(session, node)
         return deadline
 
+    async def tg_host_access(self, session, node, host_uuid=None, toggle=False):
+        config = await read_config(session)
+        squad = config['tg_squad_uuid']
+        if not squad:
+            raise ValueError('Выберите squad tg в настройках инфраструктуры')
+        hosts = await self.panel.get_all_hosts()
+        if hosts is None:
+            raise RuntimeError('Cannot fetch hosts')
+        candidates = [h for h in hosts if node.panel_uuid in [
+            item.get('uuid') if isinstance(item, dict) else item for item in h.get('nodes', [])]]
+        selected = host_uuid or node.host_uuid
+        host = next((h for h in candidates if h['uuid'] == selected), None)
+        if host_uuid and host is None:
+            raise ValueError('У ноды нет связанных hosts')
+        if host is None and len(candidates) == 1:
+            host = candidates[0]
+        if host is None:
+            return None, candidates
+        major = await self.panel.api_major()
+        if major == 2:
+            excluded = list(host.get('excludedInternalSquads') or [])
+            visible = squad not in excluded
+            values = {'excludedInternalSquads': [x for x in excluded if x != squad]
+                if not visible else list(dict.fromkeys(excluded + [squad]))}
+        else:
+            access = dict(host.get('internalSquads') or {'mode': 'EXCLUDE', 'squads': []})
+            squads = list(access.get('squads') or [])
+            if access['mode'] not in {'ALLOW_ONLY', 'EXCLUDE'}:
+                raise ValueError('Unsupported host access mode')
+            visible = (squad in squads) if access['mode'] == 'ALLOW_ONLY' else (squad not in squads)
+            add = (not visible) if access['mode'] == 'ALLOW_ONLY' else visible
+            access['squads'] = list(dict.fromkeys(squads + [squad])) if add else [x for x in squads if x != squad]
+            # ALLOW_ONLY with an empty list means no squads; never disable the whole host.
+            values = {'internalSquads': access}
+        if toggle:
+            await self.api.call('PATCH', '/hosts', dict(values, uuid=host['uuid']))
+            if host['uuid'] == node.host_uuid:
+                node.excluded_tg = visible
+                node.previous_host_access = None
+            visible = not visible
+        return visible, candidates
+
     async def restore_host_access(self, session, node):
-        if node.excluded_tg and node.host_uuid:
+        if node.excluded_tg and node.host_uuid and node.previous_host_access:
             hosts = await self.panel.get_all_hosts()
             host = next((h for h in hosts or [] if h['uuid'] == node.host_uuid), None)
             if host:

@@ -63,6 +63,21 @@ class InfrastructureHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.service.refresh_node.assert_not_awaited()
         self.assertIn('archive', self.message.edit_text.await_args.args[0])
 
+    async def test_gemini_menu_selects_explicit_host_when_multiple_exist(self):
+        self.service.node = AsyncMock(return_value=SimpleNamespace(id=8, panel_uuid='node'))
+        self.service.api.call = AsyncMock(return_value=[
+            {'uuid': 'h1', 'nodes': ['node'], 'remark': 'First'},
+            {'uuid': 'h2', 'nodes': ['node'], 'remark': 'Second'}])
+        await self.click('infra:gemini:8')
+        rows = self.message.edit_text.await_args.kwargs['reply_markup'].inline_keyboard
+        self.assertEqual([row[0].callback_data for row in rows], ['infra:gemini_host:8:h1', 'infra:gemini_host:8:h2', 'infra:node:8'])
+
+    async def test_gemini_ssh_flow_keeps_selected_host(self):
+        self.service.node = AsyncMock(return_value=SimpleNamespace(id=8))
+        self.service.deployment = AsyncMock(return_value=None)
+        await self.click('infra:gemini_enable:8:chosen-host')
+        self.assertEqual((await self.state.get_data())['gemini_host_uuid'], 'chosen-host')
+
     async def asyncSetUp(self):
         self.storage = MemoryStorage()
         self.state = FSMContext(self.storage, StorageKey(bot_id=1, chat_id=111, user_id=111))

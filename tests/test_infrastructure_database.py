@@ -82,6 +82,16 @@ class InfrastructureDatabaseTests(unittest.IsolatedAsyncioTestCase):
             session.add(deployment); await session.commit()
             return node, deployment
 
+    async def test_gemini_job_keeps_host_selection_after_session_restart(self):
+        node, deployment = await self.node_fixture()
+        async with self.factory() as session:
+            job = await self.service.enqueue(session, node, deployment, 'gemini_enable', 111, host_uuid='selected-host')
+            job_id = job.id
+            await session.commit()
+        from bot.services.infrastructure.gemini import job_host_uuid
+        async with self.factory() as session:
+            self.assertEqual(await job_host_uuid(self.service, session, node, job_id), 'selected-host')
+
     async def test_panel_deleted_node_archives_credentials_reports_and_cancels_queue(self):
         node, deployment = await self.node_fixture()
         async with self.factory() as session:

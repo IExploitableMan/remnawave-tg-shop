@@ -11,12 +11,56 @@ from bot.services.panel_infrastructure_api import PanelInfrastructureApi
 from bot.services.infrastructure.reports import aggregate, render_reports
 from bot.services.infrastructure.report_data import parse_result, result_measurements
 from bot.services.infrastructure.gemini import (
-    GOOGLE_DOMAINS, create_or_reuse_gemini_profile, has_gemini_routes,
-    modified_profile_name, prepare_gemini_config,
+    GOOGLE_DOMAINS, create_or_reuse_gemini_inbound, has_gemini_routes,
+    modified_inbound_tag, prepare_gemini_config,
 )
 
 
 class InfrastructureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tg_toggle_preserves_other_squads_and_uses_panel_state(self):
+        from unittest.mock import patch
+        for major, host in [(2, {'excludedInternalSquads': ['other']}),
+                (3, {'internalSquads': {'mode': 'EXCLUDE', 'squads': ['other']}}),
+                (3, {'internalSquads': {'mode': 'ALLOW_ONLY', 'squads': ['tg', 'other']}})]:
+            host.update(uuid='host', nodes=['node'])
+            service = object.__new__(InfrastructureService)
+            service.panel = SimpleNamespace(get_all_hosts=AsyncMock(return_value=[host]), api_major=AsyncMock(return_value=major))
+            service.api = SimpleNamespace(call=AsyncMock())
+            node = SimpleNamespace(panel_uuid='node', host_uuid='host', excluded_tg=True, previous_host_access='old')
+            with patch('bot.services.infrastructure.service.read_config', AsyncMock(return_value={'tg_squad_uuid': 'tg'})):
+                visible, _hosts = await service.tg_host_access(None, node, toggle=True)
+            self.assertFalse(visible)
+            values = service.api.call.call_args.args[2]
+            if major == 2:
+                self.assertEqual(values['excludedInternalSquads'], ['other', 'tg'])
+            else:
+                self.assertEqual(values['internalSquads']['squads'], ['other', 'tg'] if host['internalSquads']['mode'] == 'EXCLUDE' else ['other'])
+            self.assertTrue(node.excluded_tg)
+            self.assertIsNone(node.previous_host_access)
+
+    async def test_tg_multiple_hosts_require_selection_and_validate_membership(self):
+        from unittest.mock import patch
+        service = object.__new__(InfrastructureService)
+        hosts = [{'uuid': 'one', 'nodes': ['node']}, {'uuid': 'two', 'nodes': ['node']}]
+        service.panel = SimpleNamespace(get_all_hosts=AsyncMock(return_value=hosts), api_major=AsyncMock(return_value=2))
+        service.api = SimpleNamespace(call=AsyncMock())
+        node = SimpleNamespace(panel_uuid='node', host_uuid=None)
+        with patch('bot.services.infrastructure.service.read_config', AsyncMock(return_value={'tg_squad_uuid': 'tg'})):
+            visible, candidates = await service.tg_host_access(None, node, toggle=True)
+            self.assertIsNone(visible)
+            self.assertEqual(len(candidates), 2)
+            service.api.call.assert_not_awaited()
+            with self.assertRaises(ValueError):
+                await service.tg_host_access(None, node, 'unrelated', toggle=True)
+            await service.tg_host_access(None, node, 'two', toggle=True)
+            self.assertEqual(service.api.call.call_args.args[2]['uuid'], 'two')
+
+    async def test_manual_tg_hide_is_not_undone_by_renewal(self):
+        service = object.__new__(InfrastructureService)
+        service.panel = SimpleNamespace(get_all_hosts=AsyncMock())
+        await service.restore_host_access(None, SimpleNamespace(excluded_tg=True, host_uuid='host', previous_host_access=None))
+        service.panel.get_all_hosts.assert_not_awaited()
+
     def test_numbering_uses_current_names_including_nodes_without_country(self):
         self.assertEqual(next_node_number(['node1 (XX)', 'node2']), 3)
         self.assertEqual(next_node_number(['NODE12', 'unrelated']), 13)
@@ -70,28 +114,22 @@ class InfrastructureTests(unittest.IsolatedAsyncioTestCase):
             prepare_gemini_config(source, 'vless')
 
     def test_modifier_suffixes_are_stable_and_alphabetical(self):
-        self.assertEqual(modified_profile_name('Default-Profile', ['GEMINI', 'ADOBE']),
-                         'Default-Profile-ADOBE-GEMINI')
+        self.assertEqual(modified_inbound_tag('vless-443', ['GEMINI', 'ADOBE']),
+                         'vless-443-ADOBE-GEMINI')
 
-    async def test_gemini_profile_reuses_only_a_matching_existing_modifier(self):
+    async def test_gemini_inbound_reuses_only_a_matching_existing_modifier(self):
         source_config = {'inbounds': [{'tag': 'vless-443'}], 'outbounds': [
-            {'tag': 'DIRECT', 'protocol': 'freedom'},
-            {'tag': 'BLOCK', 'protocol': 'blackhole', 'settings': {}}], 'routing': {'rules': []}}
+            {'tag': 'DIRECT', 'protocol': 'freedom'}, {'tag': 'BLOCK', 'protocol': 'blackhole', 'settings': {}}],
+            'routing': {'rules': []}}
         updated, tag = prepare_gemini_config(source_config, 'vless-443')
-        source = {'uuid': 'source', 'name': 'Default-Profile', 'config': source_config,
-                  'inbounds': [{'uuid': 'source-in', 'tag': 'vless-443'}]}
-        modified = {'uuid': 'gemini', 'name': 'Default-Profile-GEMINI', 'config': updated,
-                    'inbounds': [{'uuid': 'gemini-in', 'tag': tag}]}
-        api = SimpleNamespace(
-            profiles=AsyncMock(return_value=[modified]),
-            call=AsyncMock(side_effect=lambda method, path, payload=None:
-                source if path == '/config-profiles/source' else modified),
-        )
-        result, source_tag, modified_tag, inbound_uuid = await create_or_reuse_gemini_profile(
-            api, 'source', 'source-in')
-        self.assertEqual((result['uuid'], source_tag, modified_tag, inbound_uuid),
-                         ('gemini', 'vless-443', tag, 'gemini-in'))
-        self.assertFalse(any(call.args[0] == 'POST' for call in api.call.await_args_list))
+        profile = {'uuid': 'source', 'name': 'Default-Profile', 'config': updated,
+            'inbounds': [{'uuid': 'source-in', 'tag': 'vless-443'}, {'uuid': 'gemini-in', 'tag': tag}]}
+        api = SimpleNamespace(call=AsyncMock(return_value=profile))
+        result, source_tag, modified_tag, inbound_uuid = await create_or_reuse_gemini_inbound(api, 'source', 'source-in')
+        self.assertEqual((result['uuid'], source_tag, modified_tag, inbound_uuid), ('source', 'vless-443', tag, 'gemini-in'))
+        self.assertTrue(all(call.args[0] == 'GET' for call in api.call.await_args_list))
+        self.assertEqual(updated['inbounds'][0], source_config['inbounds'][0])
+        self.assertEqual(len(updated['inbounds']), 2)
 
     async def test_completed_diagnostic_checkpoint_renders_without_contacting_vps(self):
         import json

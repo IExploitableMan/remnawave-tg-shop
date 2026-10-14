@@ -254,14 +254,30 @@ checks passed on the dedicated test bot on 2026-10-13. See the acceptance log.
 WARP integration is deferred. Psiphon/Gemini routing is implemented for panel
 2.x and 3.x and verified on the dedicated test stand; see the acceptance log.
 
-Gemini enable uses the existing host's inbound, installs the loopback-only proxy,
-and assigns a checked copy of the profile while retaining all active inbounds.
-Missing SSH access opens the credential flow. The installer uses automatic exit
-selection instead of a fixed country. Panel-side Gemini selection is checked
-periodically; missing access triggers a notification rather than an installation.
-Disabling restores the recorded original profile and host binding. A core reload
-can interrupt connections briefly; the unchanged client was observed to recover
-with an 8.05-second gap between successful HTTP samples on the test stand.
+Gemini enable copies only the selected host's inbound inside its existing profile,
+keeps its connection settings and adds Google TCP via loopback Psiphon plus a
+Google UDP block rule. Original inbound tags/UUIDs and all other hosts remain
+unchanged. The node activates the sibling instead of the source, never both
+listeners on the same port. The host UUID, address, port and overrides are retained.
+Multiple hosts require explicit selection in the node's Gemini menu. Two hosts
+sharing the same source inbound cannot be switched independently; assign separate
+inbounds first. A host shared by several nodes is also rejected for this operation.
+
+Missing SSH access opens the credential flow and retains the selected host for
+resumption/retry. The installer uses automatic exit selection. Panel-side Gemini
+selection is checked for every linked host; missing SSH triggers a notification.
+States and queued host selections are persisted per host/job. The node's profile
+is not cloned. Disabling replaces only that host's sibling with its source inbound,
+preserving other active inbounds, including later panel edits. The inactive sibling
+and squad membership remain available for other nodes and future reuse.
+
+Profile/inbound changes are verified through the panel. Before switching, the bot
+checks that no one changed the node address or selected bindings while installation
+was running. A forced restart is followed by three connected observations; partial
+switch/restart failures compensate node, host and squad changes. Core reloads can
+interrupt existing sessions; unchanged REALITY client files were verified to work
+before/after enable, disable and an injected host-switch failure on the 2026-10-15
+stand. That does not claim uninterrupted existing TCP sessions.
 
 Node deletions in the panel archive the local node and retain access/tests/history.
 Current billing is checked before deletion because some panels return 500 for a
@@ -269,3 +285,7 @@ record already removed by cascade. Migration 0017 makes node names unique only
 among active records, so archived names do not reserve the next node number.
 
 Final checkpoint-count polish: 56 focused infrastructure tests passed, including legacy extra-result handling. The diagnostic catalog is version 3. This changes rendering/progress bookkeeping only; no remote benchmark was run.
+
+### Manual tg host visibility
+
+The node card reads the current panel host restrictions and toggles only the configured tg squad. Other squad restrictions, inbound settings and host disabled state remain unchanged. Multiple linked hosts require explicit selection when there is no recorded primary host. Manual hiding is retained on renewal; renewal restores only restrictions saved by the expiry worker. The Excluded Internal Squads property belongs to hosts in Panel API 2.x, and is represented by internalSquads in API 3.x.

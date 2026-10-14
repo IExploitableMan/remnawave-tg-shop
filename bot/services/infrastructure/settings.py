@@ -9,6 +9,8 @@ DEFAULTS = {
     'profile_uuid': '', 'inbound_uuid': '', 'tg_squad_uuid': '', 'panel_ip': '',
     'node_version_2': '2.8.0', 'node_version_3': '3.4.2',
     'sni_ru': [], 'sni_other': [], 'ssh_keys': [], 'large_repeats': 1,
+    'bridge_address': '', 'bridge_ssh_port': 22, 'bridge_ssh_user': 'root',
+    'bridge_host_public_key': '',
 }
 
 

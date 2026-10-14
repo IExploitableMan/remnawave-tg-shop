@@ -487,6 +487,7 @@ class InfrastructureJob(Base):
     completion_message_id = Column(BigInteger, nullable=True)
     started_at = Column(DateTime(timezone=True), nullable=True)
     target_version = Column(String(32), nullable=True)
+    payload = Column(Text, nullable=True)  # JSON operation parameters, e.g. the bridge SNI
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     finished_at = Column(DateTime(timezone=True), nullable=True)
 

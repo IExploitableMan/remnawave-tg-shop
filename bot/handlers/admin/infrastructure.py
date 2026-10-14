@@ -103,6 +103,7 @@ async def card(callback, service, session, node_id):
     if not gemini_enabled or gemini_revert_available:
         buttons.insert(-6, (tr('infra_gemini_disable' if gemini_enabled else 'infra_gemini_enable'),
             f"infra:gemini_{'disable' if gemini_enabled else 'enable'}:{node.id}"))
+    buttons.insert(-6, (tr('infra_bridge_create'), f'infra:bridge_create:{node.id}'))
     await show(callback, text_value, buttons)
 
 
@@ -278,10 +279,11 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
     elif action in {'node', 'adopt'}: target = 'infra:nodes'
     elif action in {'provider', 'addprovider'}: target = 'infra:providers'
     elif action in {'provideredit', 'payment'}: target = f'infra:provider:{argument}'
-    elif action in {'setting', 'profiles', 'squads', 'squad', 'pool', 'inbound'}: target = 'infra:settings'
+    elif action in {'setting', 'profiles', 'squads', 'squad', 'pool', 'inbound', 'bridge'}: target = 'infra:settings'
+    elif action in {'bridge_setting', 'bridge_key', 'bridge_test'}: target = 'infra:bridge'
     elif action == 'profile': target = 'infra:profiles'
     elif action in {'addkey', 'sync_keys'}: target = 'infra:keys'
-    elif action in {'tests', 'test', 'restart', 'upgrade', 'extend', 'access', 'edit', 'sni', 'credentials', 'delete', 'reports', 'history', 'upgrade_confirm', 'gemini_enable', 'gemini_disable'}:
+    elif action in {'tests', 'test', 'restart', 'upgrade', 'extend', 'access', 'edit', 'sni', 'credentials', 'delete', 'reports', 'history', 'upgrade_confirm', 'gemini_enable', 'gemini_disable', 'bridge_create'}:
         target = f'infra:node:{argument}'
     elif action in {'job', 'cancel', 'retry'}: target = 'infra:jobs'
     if action == 'job' and len(parts) > 4 and parts[3] == 'queue':
@@ -440,7 +442,8 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             config = await read_config(session)
             await show(callback, tr('infra_settings_title'), [(f'{tr(label)}: {config[key]}', f'infra:setting:{key}') for key, label in LABELS.items()] +
                 [(tr('infra_default_profile'), 'infra:profiles'), (tr('infra_tg_squad'), 'infra:squads'),
-                 (tr('infra_sni_ru'), 'infra:pool:sni_ru'), (tr('infra_sni_other'), 'infra:pool:sni_other')] + back())
+                 (tr('infra_sni_ru'), 'infra:pool:sni_ru'), (tr('infra_sni_other'), 'infra:pool:sni_other'),
+                 (tr('infra_bridge_settings'), 'infra:bridge')] + back())
         elif action == 'setting':
             if argument not in LABELS:
                 raise ValueError(tr('infra_setting_not_found'))
@@ -493,6 +496,44 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             await callback.message.answer(tr('infra_current_pool') + '\n'.join(html.escape(v) for v in config[argument]) +
                 tr('infra_ask_pool'),
                 reply_markup=keyboard(back()))
+        elif action == 'bridge':
+            config = await read_config(session)
+            status = tr('infra_bridge_pinned' if config['bridge_host_public_key'] else 'infra_bridge_not_pinned')
+            await show(callback, tr('infra_bridge_title') + status, [
+                (f"{tr('infra_bridge_address')}: {html.escape(config['bridge_address'] or '—')}", 'infra:bridge_setting:bridge_address'),
+                (f"{tr('infra_bridge_port')}: {config['bridge_ssh_port']}", 'infra:bridge_setting:bridge_ssh_port'),
+                (f"{tr('infra_bridge_user')}: {html.escape(config['bridge_ssh_user'])}", 'infra:bridge_setting:bridge_ssh_user'),
+                (tr('infra_bridge_key'), 'infra:bridge_key'),
+                (tr('infra_bridge_test'), 'infra:bridge_test')] + back())
+        elif action == 'bridge_setting':
+            if argument not in {'bridge_address', 'bridge_ssh_port', 'bridge_ssh_user'}:
+                raise ValueError(tr('infra_setting_not_found'))
+            labels = {'bridge_address': tr('infra_bridge_address'),
+                      'bridge_ssh_port': tr('infra_bridge_port'),
+                      'bridge_ssh_user': tr('infra_bridge_user')}
+            await state.update_data(flow='bridge_setting', key=argument)
+            await state.set_state(InfrastructureStates.input)
+            await callback.message.answer(tr('infra_ask_setting', p0=labels[argument]), reply_markup=keyboard(back()))
+        elif action == 'bridge_key':
+            if not service.settings.INFRA_SSH_PRIVATE_KEY:
+                raise ValueError(tr('infra_bridge_unconfigured'))
+            key = asyncssh.read_private_key(service.settings.INFRA_SSH_PRIVATE_KEY)
+            await callback.message.answer(tr('infra_bridge_key_text')
+                + f'\n<code>{html.escape(key.export_public_key().decode().strip())}</code>',
+                reply_markup=keyboard(back()))
+        elif action == 'bridge_test':
+            config = await read_config(session)
+            if not config['bridge_address'] or not service.settings.INFRA_SSH_PRIVATE_KEY:
+                raise ValueError(tr('infra_bridge_unconfigured'))
+            public, fingerprint = await host_key(config['bridge_address'], int(config['bridge_ssh_port']))
+            async with asyncssh.connect(host=config['bridge_address'], port=int(config['bridge_ssh_port']),
+                    username=config['bridge_ssh_user'], client_keys=[service.settings.INFRA_SSH_PRIVATE_KEY],
+                    known_hosts=([asyncssh.import_public_key(public)], [], []),
+                    connect_timeout=20, login_timeout=20):
+                pass
+            await save_config(session, 'bridge_host_public_key', public, callback.from_user.id)
+            await session.commit()
+            await callback.message.answer(tr('infra_bridge_verified', p0=html.escape(fingerprint)), reply_markup=keyboard(back()))
         elif action == 'keys':
             config = await read_config(session)
             await show(callback, tr('infra_keys_title') + '\n'.join(html.escape(k['name']) for k in config['ssh_keys']),
@@ -523,14 +564,17 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             BACK_TARGET.set(f'infra:node:{node.id}')
             for content in await service.snapshot(session, int(argument), admin_id=callback.from_user.id):
                 await callback.message.answer(content, reply_markup=keyboard(back()))
-        elif action in {'extend', 'access', 'edit', 'sni'}:
+        elif action in {'extend', 'access', 'edit', 'sni', 'bridge_create'}:
             node = await service.node(session, argument)
+            if action == 'bridge_create' and not await service.deployment(session, node.id):
+                raise ValueError(tr('infra_attach_access_first'))
             await state.update_data(flow=action, node_id=node.id)
             await state.set_state(InfrastructureStates.input)
             prompt = {'extend': tr('infra_ask_extension', p0=node.period_days),
                 'access': tr('infra_ask_ssh_only'),
                 'edit': tr('infra_ask_host_only'),
-                'sni': tr('infra_ask_sni')}[action]
+                'sni': tr('infra_ask_sni'),
+                'bridge_create': tr('infra_ask_bridge_sni')}[action]
             await callback.message.answer(prompt, reply_markup=keyboard(back()))
         elif action == 'tests':
             await show(callback, tr('infra_test_levels'),
@@ -651,6 +695,7 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
                         raise ValueError(tr('infra_deployment_replaced'))
                     await service.validate_deployment(session, node, deployment)
                 new_job = await service.enqueue(session, node, deployment, job.kind, callback.from_user.id)
+                new_job.payload = job.payload
                 if job.kind in {'medium', 'large'} and job.status != 'done':
                     source = Path(settings.INFRA_ARTIFACT_DIR) / 'reports' / str(job.id) / 'results.json'
                     if source.exists():
@@ -784,6 +829,26 @@ async def infrastructure_input(message: types.Message, state: FSMContext, sessio
                 if not re.fullmatch(r'\d+\.\d+\.\d+', parsed):
                     raise ValueError(tr('infra_invalid_version'))
             await save_config(session, key, parsed, message.from_user.id)
+        elif flow == 'bridge_setting':
+            key = data['key']
+            if key == 'bridge_address':
+                parsed = validate_address(value)
+                config = await read_config(session)
+                if parsed != config['bridge_address']:
+                    # A pinned host key belongs to the previous server only.
+                    await save_config(session, 'bridge_host_public_key', '', message.from_user.id)
+            elif key == 'bridge_ssh_port':
+                parsed = int(value)
+                if not 1 <= parsed <= 65535:
+                    raise ValueError(tr('infra_invalid_port'))
+            else:
+                parsed = value.strip()
+                if not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', parsed):
+                    raise ValueError(tr('infra_invalid_user'))
+                if key == 'bridge_ssh_user' and parsed != 'root':
+                    # The bridge playbook runs become tasks without a become password.
+                    raise ValueError(tr('infra_root_required'))
+            await save_config(session, key, parsed, message.from_user.id)
         elif flow == 'pool':
             entries = [] if value.strip() == '-' else list(dict.fromkeys(validate_hostname(v) for v in value.splitlines() if v.strip()))
             if len(entries) > 200:
@@ -856,6 +921,21 @@ async def infrastructure_input(message: types.Message, state: FSMContext, sessio
                 raise ValueError(tr('infra_sni_not_allowed'))
             await service.api.call('PATCH', '/hosts', {'uuid': node.host_uuid, 'sni': sni})
             deployment.sni = sni
+        elif flow == 'bridge_create':
+            sni = validate_hostname(value)
+            node = await service.node(session, data['node_id'])
+            deployment = await service.deployment(session, node.id)
+            if not deployment:
+                raise ValueError(tr('infra_attach_access_first'))
+            config = await read_config(session)
+            if not config['bridge_address'] or not config['bridge_host_public_key']:
+                raise ValueError(tr('infra_bridge_unconfigured'))
+            await service.validate_deployment(session, node, deployment)
+            job = await service.enqueue(session, node, deployment, 'bridge_create', message.from_user.id)
+            job.payload = json.dumps({'sni': sni})
+            await session.commit()
+            await publish_job(service, job.id)
+            await message.answer(tr('infra_operation_added', p0=html.escape(node.name)))
         else:
             raise ValueError(tr('infra_form_closed'))
         await session.commit()

@@ -30,6 +30,34 @@ def ssh_arguments(deployment, settings, password=None):
         known_hosts=([key], [], []), connect_timeout=20, login_timeout=20)
 
 
+def _ansible_environment():
+    return dict(os.environ, ANSIBLE_HOST_KEY_CHECKING='True', ANSIBLE_NOCOLOR='1',
+               ANSIBLE_RETRY_FILES_ENABLED='False', ANSIBLE_LOG_PATH='/dev/null',
+               ANSIBLE_SSH_PASSWORD_MECHANISM='sshpass')
+
+
+async def _run_playbook(playbook, inventory_path):
+    process = await asyncio.create_subprocess_exec('python', '-m', 'ansible.cli.playbook',
+        '-i', str(inventory_path), str(playbook),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        env=_ansible_environment(), start_new_session=True)
+    try:
+        output, errors = await asyncio.wait_for(process.communicate(), timeout=1800)
+        if process.returncode:
+            import re
+            tasks = re.findall(r'TASK \[([^\]]+)\]', output.decode(errors='replace'))
+            failed_task = tasks[-1] if tasks else 'initialization'
+            raise RuntimeError(f'Ansible: код {process.returncode}, этап {failed_task}; секретный вывод не сохранён')
+    finally:
+        if process.returncode is None:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                await asyncio.wait_for(process.wait(), 10)
+            except asyncio.TimeoutError:
+                os.killpg(process.pid, signal.SIGKILL)
+                await process.wait()
+
+
 async def ansible(service, deployment, config, kind='provision', secret=None):
     password = service.cipher().decrypt(deployment.credentials.encode()).decode()
     root = Path(service.settings.INFRA_ARTIFACT_DIR)
@@ -53,28 +81,31 @@ async def ansible(service, deployment, config, kind='provision', secret=None):
             inventory['all']['hosts']['node']['ansible_ssh_private_key_file'] = service.settings.INFRA_SSH_PRIVATE_KEY
         path = directory / 'inventory.json'
         path.write_text(json.dumps(inventory)); path.chmod(0o600)
-        env = dict(os.environ, ANSIBLE_HOST_KEY_CHECKING='True', ANSIBLE_NOCOLOR='1',
-                   ANSIBLE_RETRY_FILES_ENABLED='False', ANSIBLE_LOG_PATH='/dev/null',
-                   ANSIBLE_SSH_PASSWORD_MECHANISM='sshpass')
-        process = await asyncio.create_subprocess_exec('python', '-m', 'ansible.cli.playbook',
-            '-i', str(path), str(Path(__file__).resolve().parents[3] / 'infra' / 'ansible' / f'{kind}.yml'),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            env=env, start_new_session=True)
-        try:
-            output, errors = await asyncio.wait_for(process.communicate(), timeout=1800)
-            if process.returncode:
-                import re
-                tasks = re.findall(r'TASK \[([^\]]+)\]', output.decode(errors='replace'))
-                failed_task = tasks[-1] if tasks else 'initialization'
-                raise RuntimeError(f'Ansible: код {process.returncode}, этап {failed_task}; секретный вывод не сохранён')
-        finally:
-            if process.returncode is None:
-                os.killpg(process.pid, signal.SIGTERM)
-                try:
-                    await asyncio.wait_for(process.wait(), 10)
-                except asyncio.TimeoutError:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    await process.wait()
+        await _run_playbook(Path(__file__).resolve().parents[3] / 'infra' / 'ansible' / f'{kind}.yml', path)
+
+
+async def ansible_bridge(service, config, sni, backend, state='present'):
+    """Manage one SNI route on the shared bridge server using the bot SSH key."""
+    if not config['bridge_address'] or not config['bridge_host_public_key']:
+        raise ValueError('Мост не настроен: укажите адрес моста и проверьте подключение в настройках инфраструктуры')
+    if not service.settings.INFRA_SSH_PRIVATE_KEY:
+        raise ValueError('Не настроен ключ автоматизации INFRA_SSH_PRIVATE_KEY')
+    root = Path(service.settings.INFRA_ARTIFACT_DIR)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.TemporaryDirectory(prefix='ansible-bridge-', dir=root) as temporary:
+        directory = Path(temporary)
+        address, port = config['bridge_address'], int(config['bridge_ssh_port'])
+        host = f'[{address}]:{port}' if port != 22 else address
+        known_hosts = directory / 'known_hosts'
+        known_hosts.write_text(f'{host} {config["bridge_host_public_key"]}\n')
+        inventory = {'all': {'hosts': {'node': {'ansible_host': address, 'ansible_port': port,
+            'ansible_user': config['bridge_ssh_user'],
+            'ansible_ssh_private_key_file': service.settings.INFRA_SSH_PRIVATE_KEY,
+            'ansible_ssh_common_args': f'-o StrictHostKeyChecking=yes -o UserKnownHostsFile={known_hosts}',
+            'bridge_sni': sni, 'bridge_backend': backend, 'bridge_state': state}}}}
+        path = directory / 'inventory.json'
+        path.write_text(json.dumps(inventory)); path.chmod(0o600)
+        await _run_playbook(Path(__file__).resolve().parents[3] / 'infra' / 'ansible' / 'bridge.yml', path)
 
 
 async def stage(service, job_id, value):
@@ -263,6 +294,10 @@ async def run_job(service, job_id):
             from .gemini import remove_gemini_route
             async with service.factory() as changed:
                 await remove_gemini_route(service, changed, node, job_id, job.requested_by)
+        elif job.kind == 'bridge_create':
+            from .bridge import create_bridge
+            payload = json.loads(job.payload) if job.payload else {}
+            await create_bridge(service, node, deployment, config, job_id, payload.get('sni'))
         elif job.kind in {'small', 'medium', 'large'}:
             from .diagnostics import run_diagnostics
             await run_diagnostics(service, job, node, deployment, config)

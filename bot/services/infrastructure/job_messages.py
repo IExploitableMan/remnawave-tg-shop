@@ -14,10 +14,13 @@ from db.models import InfrastructureJob as Job, InfrastructureNode as Node, Infr
 from bot.middlewares.i18n import get_i18n_instance
 
 KINDS = {'provision': 'install', 'keys': 'keys', 'upgrade': 'upgrade', 'restart': 'restart',
-         'small': 'small', 'medium': 'medium', 'large': 'large'}
+         'small': 'small', 'medium': 'medium', 'large': 'large',
+         'gemini_enable': 'gemini_enable', 'gemini_disable': 'gemini_disable'}
 STAGES = {'queued': 'queued', 'ansible': 'install', 'panel_node': 'panel', 'connection_check': 'check',
           'host': 'host', 'billing': 'billing', 'ssh_keys': 'keys', 'verification': 'check',
-          'dependencies': 'dependencies', 'complete': 'complete'}
+          'dependencies': 'dependencies', 'complete': 'complete', 'psiphon': 'psiphon',
+          'gemini_profile': 'gemini_profile', 'gemini_switch': 'gemini_switch',
+          'gemini_done': 'complete'}
 
 
 def kind_label(job, translate):
@@ -62,6 +65,8 @@ def operation_text(job, node, translate, ahead=None):
                 error = translate(key)
                 break
         text += '\n' + html.escape(error)
+    elif job.status == 'done' and job.kind in {'gemini_enable', 'gemini_disable'}:
+        text += '\n' + translate('infra_result_' + job.kind)
     if job.finished_at and job.started_at:
         duration = max(0, int((job.finished_at - job.started_at).total_seconds()))
         text += '\n' + translate('infra_operation_duration', p0=f'{duration // 60}:{duration % 60:02}')

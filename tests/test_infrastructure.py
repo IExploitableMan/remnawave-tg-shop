@@ -5,14 +5,94 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from cryptography.fernet import Fernet
 from bot.services.infrastructure.service import InfrastructureService
-from bot.services.infrastructure.settings import choose_sni, validate_address, validate_hostname
+from bot.services.infrastructure.settings import choose_sni, validate_address, validate_hostname, next_node_number
 from bot.services.infrastructure.diagnostics import privacy_patch, clean_output
 from bot.services.panel_infrastructure_api import PanelInfrastructureApi
 from bot.services.infrastructure.reports import aggregate, render_reports
 from bot.services.infrastructure.report_data import parse_result, result_measurements
+from bot.services.infrastructure.gemini import (
+    GOOGLE_DOMAINS, create_or_reuse_gemini_profile, has_gemini_routes,
+    modified_profile_name, prepare_gemini_config,
+)
 
 
 class InfrastructureTests(unittest.IsolatedAsyncioTestCase):
+    def test_numbering_uses_current_names_including_nodes_without_country(self):
+        self.assertEqual(next_node_number(['node1 (XX)', 'node2']), 3)
+        self.assertEqual(next_node_number(['NODE12', 'unrelated']), 13)
+        self.assertEqual(next_node_number(['node1 (XX)']), 2)
+
+    def test_native_ipregion_patch_disables_upload_and_proxy_config(self):
+        from bot.services.infrastructure.diagnostics import incomplete_checks, diagnostic_plan
+        source = ('upload_debug() {\n curl_wrapper POST "https://0x0.st"\n}\n'
+                  'lookup_gemini_supported() { :; }\n'
+                  'response_with_code=$(curl "${curl_args[@]}")\n')
+        patched = privacy_patch('ipregion', source)
+        self.assertNotIn('https://0x0.st', patched)
+        self.assertIn('curl -q --noproxy "*"', patched)
+        self.assertTrue(incomplete_checks('ipregion', 'Google DE DE'))
+        self.assertFalse(incomplete_checks('ipregion', 'Gemini Supported  No  N/A'))
+        self.assertFalse(incomplete_checks('ipregion', 'Gemini Supported  Yes  Yes'))
+        for level in ('medium', 'large'):
+            plan = diagnostic_plan(level, 3)
+            self.assertEqual(sum(test[0] == 'ipregion' for _, test in plan), 1)
+
+    async def test_node_list_rejects_missing_response_instead_of_assuming_deletion(self):
+        panel = SimpleNamespace(_request=AsyncMock(return_value={'response': None}))
+        with self.assertRaises(RuntimeError):
+            await PanelInfrastructureApi(panel).nodes()
+        panel._request.return_value = {'response': []}
+        self.assertEqual(await PanelInfrastructureApi(panel).nodes(), [])
+
+    def test_gemini_modifier_is_scoped_and_does_not_mutate_source_profile(self):
+        source = {
+            'inbounds': [{'tag': 'vless-443'}],
+            'outbounds': [{'tag': 'DIRECT', 'protocol': 'freedom'},
+                          {'tag': 'BLOCK', 'protocol': 'blackhole', 'settings': {}}],
+            'routing': {'rules': [{'type': 'field', 'inboundTag': ['vless-443'],
+                                   'outboundTag': 'DIRECT'}]},
+        }
+        updated, tag = prepare_gemini_config(source, 'vless-443')
+        self.assertEqual(source['inbounds'][0]['tag'], 'vless-443')
+        self.assertEqual(tag, 'vless-443-GEMINI')
+        self.assertEqual(updated['routing']['rules'][0]['inboundTag'], [tag])
+        self.assertEqual(updated['routing']['rules'][0]['outboundTag'], 'BLOCK')
+        self.assertEqual(updated['routing']['rules'][1]['inboundTag'], [tag])
+        self.assertEqual(updated['routing']['rules'][1]['outboundTag'], 'psiphon-out')
+        self.assertEqual(updated['routing']['rules'][1]['network'], 'tcp')
+        self.assertEqual(set(updated['routing']['rules'][1]['domain']), set(GOOGLE_DOMAINS))
+        self.assertTrue(has_gemini_routes(updated, tag))
+
+    def test_gemini_modifier_rejects_conflicting_outbound(self):
+        source = {'inbounds': [{'tag': 'vless'}], 'outbounds': [
+            {'tag': 'psiphon-out', 'protocol': 'freedom'}]}
+        with self.assertRaisesRegex(ValueError, 'несовместимый outbound'):
+            prepare_gemini_config(source, 'vless')
+
+    def test_modifier_suffixes_are_stable_and_alphabetical(self):
+        self.assertEqual(modified_profile_name('Default-Profile', ['GEMINI', 'ADOBE']),
+                         'Default-Profile-ADOBE-GEMINI')
+
+    async def test_gemini_profile_reuses_only_a_matching_existing_modifier(self):
+        source_config = {'inbounds': [{'tag': 'vless-443'}], 'outbounds': [
+            {'tag': 'DIRECT', 'protocol': 'freedom'},
+            {'tag': 'BLOCK', 'protocol': 'blackhole', 'settings': {}}], 'routing': {'rules': []}}
+        updated, tag = prepare_gemini_config(source_config, 'vless-443')
+        source = {'uuid': 'source', 'name': 'Default-Profile', 'config': source_config,
+                  'inbounds': [{'uuid': 'source-in', 'tag': 'vless-443'}]}
+        modified = {'uuid': 'gemini', 'name': 'Default-Profile-GEMINI', 'config': updated,
+                    'inbounds': [{'uuid': 'gemini-in', 'tag': tag}]}
+        api = SimpleNamespace(
+            profiles=AsyncMock(return_value=[modified]),
+            call=AsyncMock(side_effect=lambda method, path, payload=None:
+                source if path == '/config-profiles/source' else modified),
+        )
+        result, source_tag, modified_tag, inbound_uuid = await create_or_reuse_gemini_profile(
+            api, 'source', 'source-in')
+        self.assertEqual((result['uuid'], source_tag, modified_tag, inbound_uuid),
+                         ('gemini', 'vless-443', tag, 'gemini-in'))
+        self.assertFalse(any(call.args[0] == 'POST' for call in api.call.await_args_list))
+
     async def test_completed_diagnostic_checkpoint_renders_without_contacting_vps(self):
         import json
         from unittest.mock import patch

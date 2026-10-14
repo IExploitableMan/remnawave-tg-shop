@@ -57,7 +57,17 @@ async def show(callback, content, buttons):
 
 
 async def card(callback, service, session, node_id):
-    node = await service.node(session, node_id)
+    node = await service.node(session, node_id, include_deleted=True)
+    if not node.deleted:
+        await service.sync_removed_nodes(session)
+        await session.commit()
+    if node.deleted:
+        BACK_TARGET.set('infra:archive')
+        await show(callback, tr('infra_archived_node', p0=html.escape(node.name)), [
+            (tr('infra_credentials'), f'infra:credentials:{node.id}'),
+            (tr('infra_test_history'), f'infra:reports:{node.id}'),
+            (tr('infra_operation_history'), f'infra:history:{node.id}')] + back())
+        return
     await service.refresh_node(session, node)
     deployment = await service.deployment(session, node.id)
     entry = await service.billing_entry(session, node)
@@ -75,6 +85,14 @@ async def card(callback, service, session, node_id):
     if not node.host_automation:
         text_value += tr('infra_access_only_mode')
     text_value += tr('infra_tg_access') + (tr('infra_excluded') if node.excluded_tg else tr('infra_not_excluded'))
+    gemini_row = await app_settings_dal.get_setting(session, f'infra.gemini.{service.scope}.{node.id}')
+    gemini_state = json.loads(gemini_row.value) if gemini_row and gemini_row.value else {}
+    gemini_enabled = bool(gemini_state.get('enabled') and deployment
+        and gemini_state.get('gemini_profile_uuid') == deployment.profile_uuid
+        and gemini_state.get('gemini_inbound_uuid') == deployment.inbound_uuid)
+    gemini_revert_available = bool(gemini_state.get('base_profile_uuid') and gemini_state.get('base_inbound_uuid'))
+    if gemini_enabled and not gemini_revert_available:
+        text_value += tr('infra_gemini_panel_selected')
     buttons = [(tr('infra_extend'), f'infra:extend:{node.id}'), (tr('infra_replace'), f'infra:replace:{node.id}'),
                (tr('infra_credentials'), f'infra:credentials:{node.id}'),
                (tr('infra_save_access'), f'infra:access:{node.id}'), (tr('infra_diagnostics'), f'infra:tests:{node.id}'),
@@ -82,6 +100,9 @@ async def card(callback, service, session, node_id):
                (tr('infra_upgrade'), f'infra:upgrade:{node.id}'),
                (tr('infra_edit_access'), f'infra:edit:{node.id}'),
                (tr('infra_change_sni'), f'infra:sni:{node.id}'), (tr('infra_delete'), f'infra:delete:{node.id}')] + back()
+    if not gemini_enabled or gemini_revert_available:
+        buttons.insert(-6, (tr('infra_gemini_disable' if gemini_enabled else 'infra_gemini_enable'),
+            f"infra:gemini_{'disable' if gemini_enabled else 'enable'}:{node.id}"))
     await show(callback, text_value, buttons)
 
 
@@ -260,7 +281,7 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
     elif action in {'setting', 'profiles', 'squads', 'squad', 'pool', 'inbound'}: target = 'infra:settings'
     elif action == 'profile': target = 'infra:profiles'
     elif action in {'addkey', 'sync_keys'}: target = 'infra:keys'
-    elif action in {'tests', 'test', 'restart', 'upgrade', 'extend', 'access', 'edit', 'sni', 'credentials', 'delete', 'reports', 'history', 'upgrade_confirm'}:
+    elif action in {'tests', 'test', 'restart', 'upgrade', 'extend', 'access', 'edit', 'sni', 'credentials', 'delete', 'reports', 'history', 'upgrade_confirm', 'gemini_enable', 'gemini_disable'}:
         target = f'infra:node:{argument}'
     elif action in {'job', 'cancel', 'retry'}: target = 'infra:jobs'
     if action == 'job' and len(parts) > 4 and parts[3] == 'queue':
@@ -288,15 +309,19 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
         elif action in {'wizard_back', 'wizard_provider_back'}:
             await wizard_back(callback.message, state, service, session, action == 'wizard_provider_back')
         elif action == 'archive':
+            await service.sync_removed_nodes(session)
+            await session.commit()
             nodes = (await session.execute(select(Node).where(Node.panel_scope == service.scope,
                 Node.deleted.is_(True)).order_by(Node.id.desc()))).scalars().all()
             await show(callback, tr('infra_archive_title'),
-                [(n.name, f'infra:reports:{n.id}') for n in nodes] + back())
+                [(n.name, f'infra:node:{n.id}') for n in nodes] + back())
         elif action == 'nodes':
+            panel_nodes, _removed = await service.sync_removed_nodes(session)
+            await session.commit()
             nodes = await service.nodes(session)
             buttons = [(n.name, f'infra:node:{n.id}') for n in nodes]
             known = {n.panel_uuid for n in nodes}
-            for node in await service.api.nodes():
+            for node in panel_nodes:
                 if node['uuid'] not in known:
                     buttons.append((tr('infra_adopt', p0=node['name']), f"infra:adopt:{node['uuid']}"))
             await show(callback, tr('infra_nodes_title'), buttons + [(tr('infra_add_node'), 'infra:new')] + back())
@@ -492,10 +517,12 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             await session.commit()
             await callback.message.answer(tr('infra_notification_saved'), reply_markup=keyboard(back()))
         elif action == 'snapshot':
-            await service.publish_snapshots(all_admins=False, admin_id=callback.from_user.id)
+            await service.publish_snapshots(all_admins=False, admin_id=callback.from_user.id, force_new=True)
         elif action == 'credentials':
+            node = await service.node(session, argument, include_deleted=True)
+            BACK_TARGET.set(f'infra:node:{node.id}')
             for content in await service.snapshot(session, int(argument), admin_id=callback.from_user.id):
-                await callback.message.answer(content)
+                await callback.message.answer(content, reply_markup=keyboard(back()))
         elif action in {'extend', 'access', 'edit', 'sni'}:
             node = await service.node(session, argument)
             await state.update_data(flow=action, node_id=node.id)
@@ -543,14 +570,20 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
                     text_value += '\n' + tr('infra_version_refresh_hint')
                 buttons.append((tr('infra_refresh'), f'infra:upgrade:{node.id}'))
                 await show(callback, text_value, buttons + back())
-        elif action in {'test', 'restart'}:
+        elif action in {'test', 'restart', 'gemini_enable', 'gemini_disable'}:
             node = await service.node(session, argument)
             deployment = await service.deployment(session, node.id)
             if not deployment:
+                if action == 'gemini_enable':
+                    BACK_TARGET.set(f'infra:node:{node.id}')
+                    await state.update_data(flow='access', node_id=node.id, resume_gemini=True)
+                    await state.set_state(InfrastructureStates.input)
+                    await callback.message.answer(tr('infra_ask_ssh_only'), reply_markup=keyboard(back()))
+                    return
                 raise ValueError(tr('infra_save_access_first'))
             await service.validate_deployment(session, node, deployment)
             kind = parts[3] if action == 'test' else action
-            if kind not in {'small', 'medium', 'large', 'restart', 'upgrade'}:
+            if kind not in {'small', 'medium', 'large', 'restart', 'upgrade', 'gemini_enable', 'gemini_disable'}:
                 raise ValueError(tr('infra_unknown_action'))
             job = await service.enqueue(session, node, deployment, kind, callback.from_user.id)
             await session.commit()
@@ -789,6 +822,11 @@ async def infrastructure_input(message: types.Message, state: FSMContext, sessio
             await session.commit()
             await service.publish_snapshots()
             await message.answer(tr('infra_credentials_saved', p0=html.escape(fingerprint)))
+            if data.get('resume_gemini'):
+                job = await service.enqueue(session, node, deployment, 'gemini_enable', message.from_user.id)
+                await session.commit()
+                await publish_job(service, job.id)
+                await message.answer(tr('infra_operation_added', p0=html.escape(node.name)))
         elif flow == 'edit':
             node = await service.node(session, data['node_id'])
             await service.refresh_node(session, node)

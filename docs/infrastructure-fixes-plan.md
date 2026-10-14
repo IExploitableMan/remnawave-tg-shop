@@ -2,6 +2,40 @@
 
 Requested on 2026-10-13. Keep this checklist with the implementation and verification.
 
+## Region, credentials and diagnostic follow-up, 2026-10-14
+
+- [x] Use Psiphon's automatic exit selection instead of a fixed DE region. The pinned installer describes auto as fastest available, not necessarily geographically closest. A rerun reconfigures an existing fixed-region installation.
+- [x] Explicit All credentials requests send fresh HTML messages; background updates still edit the latest export. Delivery errors are shown, and credentials remain available before installation completes.
+- [x] Calculate node numbers from current panel/local names, including bare `node2`, without the historical counter. Migration 0017 permits reuse of archived names without changing archived history.
+- [x] Pin the requested IPRegion script, including Gemini Supported, for both medium and large diagnostics. Ignore proxy environment/curlrc for this check and disable debug uploads. Capture it once per job and report missing Gemini results explicitly.
+
+The script's Gemini verdict compares Google's detected country with the supported
+region list; it does not authenticate with a Google account or generate a response.
+Verification: 86 focused infrastructure tests passed with a dedicated PostgreSQL
+database; script hash, privacy/direct-request transforms, Bash and Ansible syntax
+checks passed. No performance diagnostics were rerun. Evidence:
+`/tmp/infra-followup-tests.log`, `/tmp/infra-followup-static.py`.
+These changes were deployed to the authorized remote test stand on 2026-10-14;
+production was untouched. Final verification: 161 tests and the live acceptance
+cases documented in `infrastructure-acceptance-log.md`.
+
+## Panel deletion follow-up, 2026-10-14
+
+- [x] Reconcile managed nodes with a successfully validated panel node list when opening nodes/archive/cards and during the periodic billing check.
+- [x] Archive missing registered nodes, delete their linked billing record (404 is already deleted), and stop billing reminders. Preserve installations not yet registered in the panel.
+- [x] Retain SSH credentials, deployments, operation history and test reports. Archived cards offer credentials and both histories, without querying the removed panel node.
+- [x] Cancel pending operations and request cancellation of running operations for archived nodes.
+- [x] Reject failed or malformed panel responses without treating them as an empty node list. Retry unsuccessful billing cleanup on the next synchronization.
+
+Verification: 80 focused infrastructure tests passed in Docker against a fresh,
+dedicated PostgreSQL database, including report/access retention, queue cancellation,
+404 handling, billing cleanup failure, and protection of existing/unregistered nodes.
+Python syntax and locale JSON checks passed. The temporary database was removed.
+Evidence: `/tmp/infra-archive-tests.log`; runner: `/tmp/infra-archive-test-runner.py`.
+This follow-up was deployed and verified on the authorized remote test stand.
+The real panel's cascade/500-A138 billing behavior is handled using the current
+billing list; credentials, report/history fixtures and the archive card were verified.
+
 - [x] Clarify the client host address in the node wizard and keep the server IP as default.
 - [x] Recover from provider-selection/creation SSH failures without losing wizard data; show progress and errors.
 - [x] Back returns to the previous wizard step; provider creation returns to provider selection. Preserve entered values.

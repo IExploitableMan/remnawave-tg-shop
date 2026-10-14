@@ -10,7 +10,8 @@ from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.exc import IntegrityError
 from db.models import (User, PanelUserIdentity, InfrastructureNode as Node,
-                       InfrastructureDeployment as Deployment, InfrastructureJob as Job)
+                       InfrastructureDeployment as Deployment, InfrastructureJob as Job,
+                       InfrastructureReport as Report)
 from bot.services.panel_identity_service import PanelIdentityService
 from bot.services.infrastructure.service import InfrastructureService
 
@@ -47,7 +48,8 @@ class InfrastructureDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.settings = SimpleNamespace(INFRA_ENCRYPTION_KEY=Fernet.generate_key().decode(), ADMIN_IDS=[111, 222])
         self.bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=1)),
                                   edit_message_text=AsyncMock())
-        self.service = InfrastructureService(self.settings, SimpleNamespace(identities=self.identity), self.bot, self.factory)
+        self.service = InfrastructureService(self.settings, SimpleNamespace(
+            identities=self.identity, api_major=AsyncMock(return_value=2)), self.bot, self.factory)
         self.user_id = -int(uuid4().int % 1000000000) - 1000
         async with self.factory() as session:
             session.add(User(user_id=self.user_id, panel_user_uuid=str(uuid4()), addon_panel_user_uuid=str(uuid4())))
@@ -56,6 +58,7 @@ class InfrastructureDatabaseTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         async with self.factory() as session:
             nodes = (await session.execute(select(Node.id).where(Node.panel_scope == self.identity.scope))).scalars().all()
+            await session.execute(delete(Report).where(Report.job_id.in_(select(Job.id).where(Job.node_id.in_(nodes)))))
             await session.execute(delete(Job).where(Job.node_id.in_(nodes)))
             await session.execute(delete(Deployment).where(Deployment.node_id.in_(nodes)))
             await session.execute(delete(Node).where(Node.id.in_(nodes)))
@@ -78,6 +81,94 @@ class InfrastructureDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 paid_until=datetime.now(timezone.utc) + timedelta(days=30))
             session.add(deployment); await session.commit()
             return node, deployment
+
+    async def test_panel_deleted_node_archives_credentials_reports_and_cancels_queue(self):
+        node, deployment = await self.node_fixture()
+        async with self.factory() as session:
+            stored = await session.get(Node, node.id)
+            stored.panel_uuid, stored.billing_uuid = str(uuid4()), str(uuid4())
+            bill = stored.billing_uuid
+            completed = Job(node_id=node.id, deployment_id=deployment.id, kind='small',
+                status='done', requested_by=111)
+            pending = Job(node_id=node.id, deployment_id=deployment.id, kind='restart',
+                status='pending', requested_by=111)
+            running = Job(node_id=node.id, deployment_id=deployment.id, kind='medium',
+                status='running', requested_by=111)
+            session.add_all([completed, pending, running]); await session.flush()
+            report = Report(job_id=completed.id, deployment_id=deployment.id, level='small', manifest='{}')
+            session.add(report); await session.commit()
+            self.service.panel._request = AsyncMock(return_value={'error': True, 'status_code': 404})
+            self.service.api.billing = AsyncMock(return_value={'billingNodes': [{'uuid': bill, 'nodeUuid': stored.panel_uuid}]})
+            _, removed = await self.service.sync_removed_nodes(session, [])
+            await session.commit()
+            self.assertEqual(removed, [node.id])
+            self.assertTrue(stored.deleted)
+            self.assertIsNone(stored.billing_uuid)
+            self.assertEqual(pending.status, 'cancelled')
+            self.assertTrue(running.cancel_requested)
+            self.assertEqual(completed.status, 'done')
+            self.assertIsNotNone(await session.get(Report, report.id))
+            self.assertEqual(await self.service.nodes(session), [])
+            access = await self.service.snapshot(session, node.id)
+            self.assertIn('root-password', '\n'.join(access))
+            self.service.panel._request.assert_awaited_once_with('DELETE', f'/infra-billing/nodes/{bill}')
+            _, removed = await self.service.sync_removed_nodes(session, [])
+            self.assertEqual(removed, [])
+
+    async def test_failed_billing_cleanup_does_not_archive_or_cancel_jobs(self):
+        node, deployment = await self.node_fixture()
+        async with self.factory() as session:
+            stored = await session.get(Node, node.id)
+            stored.panel_uuid, stored.billing_uuid = str(uuid4()), str(uuid4())
+            self.service.panel._request = AsyncMock(return_value={'error': True, 'status_code': 503})
+            self.service.api.billing = AsyncMock(return_value={'billingNodes': [{'uuid': stored.billing_uuid,'nodeUuid': stored.panel_uuid}]})
+            with self.assertRaises(RuntimeError):
+                await self.service.sync_removed_nodes(session, [])
+            self.assertFalse(stored.deleted)
+            self.assertIsNotNone(stored.billing_uuid)
+
+    async def test_cascaded_billing_deletion_does_not_call_broken_delete_endpoint(self):
+        node, deployment = await self.node_fixture()
+        async with self.factory() as session:
+            stored = await session.get(Node,node.id)
+            stored.panel_uuid,stored.billing_uuid=str(uuid4()),str(uuid4())
+            self.service.api.billing=AsyncMock(return_value={'billingNodes':[]})
+            self.service.panel._request=AsyncMock(return_value={'error':True,'status_code':500,'details':{'errorCode':'A138'}})
+            await self.service.sync_removed_nodes(session,[])
+            await session.commit()
+            self.assertTrue(stored.deleted)
+            self.assertIsNone(stored.billing_uuid)
+            self.service.panel._request.assert_not_awaited()
+
+    async def test_archived_name_can_be_reused_but_active_names_stay_unique(self):
+        node,deployment=await self.node_fixture()
+        async with self.factory() as session:
+            (await session.get(Node,node.id)).deleted=True
+            session.add(Node(panel_scope=self.identity.scope,name=node.name,country='RU',provider_uuid=''))
+            await session.commit()
+        async with self.factory() as session:
+            self.assertEqual(len(await self.service.nodes(session)),1)
+            archived=await self.service.node(session,node.id,include_deleted=True)
+            self.assertEqual(archived.name,node.name)
+            self.assertIsNotNone(await session.get(Deployment,deployment.id))
+            session.add(Node(panel_scope=self.identity.scope,name=node.name,country='RU',provider_uuid=''))
+            with self.assertRaises(IntegrityError):await session.flush()
+            await session.rollback()
+
+    async def test_node_sync_preserves_existing_and_not_yet_installed_nodes(self):
+        node, deployment = await self.node_fixture()
+        async with self.factory() as session:
+            stored = await session.get(Node, node.id)
+            self.assertEqual((await self.service.sync_removed_nodes(session, []))[1], [])
+            stored.panel_uuid = str(uuid4())
+            self.assertEqual((await self.service.sync_removed_nodes(session, [{'uuid': stored.panel_uuid}]))[1], [])
+            self.assertFalse(stored.deleted)
+            with self.assertRaises(RuntimeError):
+                await self.service.sync_removed_nodes(session, {})
+            self.service.api.nodes = AsyncMock(side_effect=RuntimeError('panel unavailable'))
+            with self.assertRaises(RuntimeError):
+                await self.service.sync_removed_nodes(session)
+            self.assertFalse(stored.deleted)
 
     async def test_identity_survives_restart_and_preserves_legacy_base_addon_links(self):
         async with self.factory() as session:
@@ -239,6 +330,27 @@ class InfrastructureDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.edit_message_text.await_count, 2)
         self.bot.send_message.assert_not_called()
 
+    async def test_manual_credentials_request_always_sends_new_html_message(self):
+        await self.node_fixture()
+        await self.service.publish_snapshots(all_admins=False, admin_id=111, force_new=True)
+        self.bot.send_message.reset_mock()
+        self.bot.edit_message_text.reset_mock()
+        await self.service.publish_snapshots(all_admins=False, admin_id=111, force_new=True)
+        self.bot.send_message.assert_awaited_once()
+        self.assertEqual(self.bot.send_message.await_args.kwargs['parse_mode'], 'HTML')
+        self.bot.edit_message_text.assert_not_awaited()
+        self.bot.send_message.side_effect = RuntimeError('transport unavailable')
+        with self.assertRaisesRegex(RuntimeError, 'Не удалось отправить SSH-доступы'):
+            await self.service.publish_snapshots(all_admins=False, admin_id=111, force_new=True)
+
+    async def test_credentials_are_available_before_installation_completes(self):
+        node, deployment = await self.node_fixture()
+        async with self.factory() as session:
+            (await session.get(Deployment, deployment.id)).state = 'pending'
+            await session.commit()
+            messages = await self.service.snapshot(session)
+            self.assertIn('root-password', '\n'.join(messages))
+
     async def test_save_existing_access_ignores_multiple_hosts_inbounds_and_never_patches_panel(self):
         import asyncssh
         from unittest.mock import patch, MagicMock
@@ -285,12 +397,13 @@ class InfrastructureDatabaseTests(unittest.IsolatedAsyncioTestCase):
             'nodeUuid': panel_uuid, 'providerUuid': node.provider_uuid,
             'nextBillingAt': (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()}]})
         self.service.api.providers = AsyncMock(return_value=[])
+        self.service.api.nodes = AsyncMock(return_value=[{'uuid': panel_uuid}])
         self.service.api.call = AsyncMock()
         self.service.panel.get_all_hosts = AsyncMock()
         with patch('bot.services.infrastructure.service.read_config', new=AsyncMock(return_value={
                 'warning_hours': [], 'expire_exclude_tg': True, 'tg_squad_uuid': 'tg'})):
             await self.service.check_billing()
-        self.service.api.call.assert_not_awaited()
+        self.service.api.call.assert_awaited_once_with('GET', '/hosts')
         self.service.panel.get_all_hosts.assert_not_awaited()
 
     async def test_operation_progress_survives_restart_and_completion_is_separate(self):
@@ -403,6 +516,7 @@ class InfrastructureDatabaseTests(unittest.IsolatedAsyncioTestCase):
             stored.name, stored.panel_uuid = 'node100 <RU>', node.panel_uuid
             await session.commit()
         self.service.api.providers = AsyncMock(return_value=[{'uuid': node.provider_uuid, 'name': 'Provider <test>'}])
+        self.service.api.nodes = AsyncMock(return_value=[{'uuid': node.panel_uuid}])
         for overdue in (False, True):
             deadline = datetime.now(timezone.utc) + timedelta(hours=-1 if overdue else 2)
             self.service.api.billing = AsyncMock(return_value={'billingNodes': [{'uuid': str(uuid4()),

@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Float, ForeignKey, UniqueConstraint, Text, BigInteger
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Float, ForeignKey, UniqueConstraint, Text, BigInteger, Index, text
 from sqlalchemy.orm import relationship, DeclarativeBase
 from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlalchemy.sql import func
@@ -447,7 +447,8 @@ class InfrastructureNode(Base):
     previous_host_access = Column(Text, nullable=True)
     deleted = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    __table_args__ = (UniqueConstraint('panel_scope', 'name'),
+    __table_args__ = (Index('uq_infra_active_node_name', 'panel_scope', 'name', unique=True,
+                         postgresql_where=text('deleted = false')),
                      UniqueConstraint('panel_scope', 'panel_uuid'))
 
 

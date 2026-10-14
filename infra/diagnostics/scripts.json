@@ -1,7 +1,7 @@
 {
   "ipregion": {
-    "url": "https://raw.githubusercontent.com/Davoyan/ipregion/main/ipregion.sh",
-    "sha256": "17eb73e776f7ab292e30f12223a78c8f25a0ed6808e8204434d122f06e4b4b0e"
+    "url": "https://ipregion.vrnt.xyz",
+    "sha256": "abefb64b14dc1b2ab2ad9d20423b1f37e27e88dd60a05b7e62a45da05c0a94e0"
   },
   "censorcheck": {
     "url": "https://raw.githubusercontent.com/vernette/censorcheck/master/censorcheck.sh",

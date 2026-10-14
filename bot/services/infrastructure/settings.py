@@ -12,6 +12,13 @@ DEFAULTS = {
 }
 
 
+def next_node_number(names):
+    """Use only current node names, including bare node2; ignore archived names."""
+    maximum = max([int(match[1]) for name in names
+        if (match := re.match(r'^node(\d+)(?:\b|\s)', name.strip(), re.I))] or [0])
+    return maximum + 1
+
+
 def validate_hostname(value):
     value = str(value).strip().lower().rstrip('.')
     if not value or len(value) > 253 or not all(re.fullmatch(

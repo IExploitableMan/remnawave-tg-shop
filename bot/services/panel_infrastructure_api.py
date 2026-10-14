@@ -15,7 +15,11 @@ class PanelInfrastructureApi:
         return result.get('response')
 
     async def nodes(self):
-        return await self.call('GET', '/nodes') or []
+        result = await self.call('GET', '/nodes')
+        if not isinstance(result, list) or any(
+                not isinstance(node, dict) or not node.get('uuid') for node in result):
+            raise RuntimeError('Не удалось получить полный список нод панели')
+        return result
 
     async def providers(self):
         result = await self.call('GET', '/infra-billing/providers') or {}

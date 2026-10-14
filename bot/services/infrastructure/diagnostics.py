@@ -18,7 +18,7 @@ from .provisioning import ssh_arguments, stage
 from .settings import validate_address
 
 CATALOG = [
-    ('ipregion', 'IP Region', 'ipregion', '', 600),
+    ('ipregion', 'IP Region — исходный IP и доступность Gemini', 'ipregion', '', 600),
     ('geo', 'Геоблокировки', 'censorcheck', '--mode geoblock', 600),
     ('dpi', 'DPI', 'censorcheck', '--mode dpi', 600),
     ('tlab_censor', 'Доступность сервисов', 'tlab_censor', '', 600),
@@ -60,7 +60,18 @@ def completed_checks(results, plan):
 
 
 def privacy_patch(name, content):
-    if name == 'ipcheck':
+    if name == 'ipregion':
+        # Never upload debug/results, even if flags are changed in the future.
+        content, count = re.subn(r'(?ms)^upload_debug\(\) \{\n.*?^\}',
+            'upload_debug() {\n  return 0\n}', content)
+        if count != 1 or 'lookup_gemini_supported()' not in content:
+            raise ValueError('Изменился IP Region: не удалось подтвердить проверку Gemini и отключение выгрузки')
+        # Disregard inherited proxy environment and curlrc: measure the VPS exit.
+        content = content.replace('response_with_code=$(curl "${curl_args[@]}")',
+            'response_with_code=$(curl -q --noproxy "*" "${curl_args[@]}")')
+        if 'curl -q --noproxy "*"' not in content:
+            raise ValueError('Не удалось подтвердить прямое подключение IP Region')
+    elif name == 'ipcheck':
         # Disable report upload unconditionally, not merely through caller flags.
         content = '\n'.join(':' if 'https://upload.check.place' in line else line
                             for line in content.splitlines())
@@ -169,6 +180,8 @@ def incomplete_checks(test_id, output):
     warnings = re.findall(patterns[test_id], output, re.I) if test_id in patterns else []
     if test_id == 'yabs' and re.search(r'^\s*(?:Single Core|Multi Core)\s*\|[ \t]*$', output, re.M):
         warnings.append('Geekbench: численные результаты не получены; исходный вывод сохранён')
+    if test_id == 'ipregion' and not re.search(r'Gemini Supported\s+(?:Yes|No)\b', output):
+        warnings.append('Gemini: доступность с исходного IP не определена')
     return warnings
 
 
@@ -239,6 +252,8 @@ async def run_diagnostics(service, job, node, deployment, config):
                         continue
                     await stage(service, job.id, f'test:{completed_checks(results, plan)}:{len(plan)}:{iteration}:{repeats}:{test_id}')
                     actual = f'bash {remote}/{script}.sh {command}' if script else command
+                    if test_id == 'ipregion':
+                        actual = 'env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u http_proxy -u HTTPS_PROXY -u https_proxy ' + actual
                     # Every process group is isolated and bounded. Cancellation
                     # kills the process group, not just the SSH channel.
                     await connection.run(f'rm -f {remote}/exit.txt', timeout=10)
@@ -288,7 +303,7 @@ async def run_diagnostics(service, job, node, deployment, config):
 async def finalize_report(service, job, node, deployment, directory, results):
     manifest = {'node': node.name, 'address': deployment.address, 'level': job.kind,
                 'deployment_id': deployment.id, 'created_at': datetime.now(timezone.utc).isoformat(),
-                'results': results, 'catalog_version': 3}
+                'results': results, 'catalog_version': 4}
     (directory / 'results.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
     from .reports import render_reports
     artifacts = await asyncio.to_thread(render_reports, directory, manifest)

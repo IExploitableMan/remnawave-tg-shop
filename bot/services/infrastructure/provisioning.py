@@ -255,6 +255,14 @@ async def run_job(service, job_id):
                 await changed.commit()
         elif job.kind == 'restart':
             await service.api.restart_node(node.panel_uuid)
+        elif job.kind == 'gemini_enable':
+            from .gemini import apply_gemini_route
+            async with service.factory() as changed:
+                await apply_gemini_route(service, changed, node, deployment, config, job_id, job.requested_by)
+        elif job.kind == 'gemini_disable':
+            from .gemini import remove_gemini_route
+            async with service.factory() as changed:
+                await remove_gemini_route(service, changed, node, job_id, job.requested_by)
         elif job.kind in {'small', 'medium', 'large'}:
             from .diagnostics import run_diagnostics
             await run_diagnostics(service, job, node, deployment, config)

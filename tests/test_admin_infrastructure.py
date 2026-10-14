@@ -19,6 +19,50 @@ from bot.services.infrastructure.diagnostics import send_artifacts
 
 
 class InfrastructureHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_gemini_without_ssh_requests_access_and_preserves_resume_action(self):
+        self.service.node = AsyncMock(return_value=SimpleNamespace(id=8))
+        self.service.deployment = AsyncMock(return_value=None)
+        await self.click('infra:gemini_enable:8')
+        data = await self.state.get_data()
+        self.assertEqual(data['flow'], 'access')
+        self.assertTrue(data['resume_gemini'])
+        self.assertEqual(data['node_id'], 8)
+        self.assertEqual(await self.state.get_state(), InfrastructureStates.input.state)
+        self.assertEqual(self.message.answer.await_args.kwargs['reply_markup'].inline_keyboard[-1][0].callback_data, 'infra:node:8')
+
+    async def test_all_credentials_requests_a_new_visible_export(self):
+        self.service.publish_snapshots = AsyncMock()
+        await self.click('infra:snapshot')
+        self.service.publish_snapshots.assert_awaited_once_with(
+            all_admins=False, admin_id=111, force_new=True)
+
+    async def test_archived_card_offers_credentials_and_history_without_panel_requests(self):
+        self.service.node = AsyncMock(return_value=SimpleNamespace(id=7, name='old <node>', deleted=True))
+        self.service.refresh_node = AsyncMock()
+        self.service.sync_removed_nodes = AsyncMock()
+        await self.click('infra:node:7')
+        content = self.message.edit_text.await_args.args[0]
+        self.assertIn('old &lt;node&gt;', content)
+        self.assertIn('archive', content)
+        rows = self.message.edit_text.await_args.kwargs['reply_markup'].inline_keyboard
+        self.assertEqual([row[0].callback_data for row in rows], [
+            'infra:credentials:7', 'infra:reports:7', 'infra:history:7', 'infra:archive'])
+        self.service.refresh_node.assert_not_awaited()
+        self.service.sync_removed_nodes.assert_not_awaited()
+
+    async def test_missing_panel_node_card_commits_archiving_before_rendering(self):
+        node = SimpleNamespace(id=8, name='removed node', deleted=False)
+        self.service.node = AsyncMock(return_value=node)
+        async def sync(session):
+            node.deleted = True
+            return [], [node.id]
+        self.service.sync_removed_nodes = AsyncMock(side_effect=sync)
+        self.service.refresh_node = AsyncMock()
+        await self.click('infra:node:8')
+        self.session.commit.assert_awaited_once()
+        self.service.refresh_node.assert_not_awaited()
+        self.assertIn('archive', self.message.edit_text.await_args.args[0])
+
     async def asyncSetUp(self):
         self.storage = MemoryStorage()
         self.state = FSMContext(self.storage, StorageKey(bot_id=1, chat_id=111, user_id=111))

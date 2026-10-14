@@ -14,7 +14,7 @@ from db.models import (InfrastructureNode as Node, InfrastructureDeployment as D
                        InfrastructureJob as Job, InfrastructureReport as Report)
 from db.dal import app_settings_dal
 from bot.services.panel_infrastructure_api import PanelInfrastructureApi
-from .settings import read_config, choose_sni, validate_address
+from .settings import read_config, choose_sni, validate_address, next_node_number
 
 
 def utcnow():
@@ -46,6 +46,50 @@ class InfrastructureService:
         return (await session.execute(select(Node).where(
             Node.panel_scope == self.scope, Node.deleted.is_(False)).order_by(Node.id))).scalars().all()
 
+    async def sync_removed_nodes(self, session, panel_nodes=None):
+        """Archive confirmed panel deletions; retain access and report records."""
+        panel_nodes = await self.api.nodes() if panel_nodes is None else panel_nodes
+        if not isinstance(panel_nodes, list) or any(
+                not isinstance(item, dict) or not item.get('uuid') for item in panel_nodes):
+            raise RuntimeError('Не удалось получить полный список нод панели')
+        present = {item['uuid'] for item in panel_nodes}
+        removed = []
+        # Installations not yet registered in the panel are not deletions.
+        missing = [node for node in await self.nodes(session)
+            if node.panel_uuid and node.panel_uuid not in present]
+        if not missing:
+            return panel_nodes, removed
+        billing = await self.api.billing()
+        entries = billing.get('billingNodes') if isinstance(billing, dict) else None
+        if not isinstance(entries, list) or any(not isinstance(e, dict) or not e.get('uuid') for e in entries):
+            raise RuntimeError('Не удалось получить полный список биллинга панели')
+        for node in missing:
+            # Node deletion can cascade to billing. Some panel versions return
+            # 500 A138 instead of 404 when deleting that already missing record.
+            linked = lambda entry: entry.get('nodeUuid') or (entry.get('node') or {}).get('uuid')
+            entry = next((e for e in entries if linked(e) == node.panel_uuid), None)
+            if not entry and node.billing_uuid:
+                entry = next((e for e in entries if e['uuid'] == node.billing_uuid
+                    and linked(e) is None), None)
+            billing_uuid = entry['uuid'] if entry else None
+            if billing_uuid:
+                result = await self.panel._request('DELETE', f'/infra-billing/nodes/{billing_uuid}')
+                if not result or (result.get('error') and result.get('status_code') != 404):
+                    raise RuntimeError('Не удалось удалить биллинг удалённой ноды; синхронизация будет повторена')
+            node.billing_uuid = None
+            node.deleted = True
+            jobs = (await session.execute(select(Job).where(Job.node_id == node.id,
+                Job.status.in_(['pending', 'running'])))).scalars().all()
+            for job in jobs:
+                if job.status == 'pending':
+                    job.status, job.finished_at = 'cancelled', utcnow()
+                    job.result = 'Нода удалена из панели'
+                else:
+                    job.cancel_requested = True
+            removed.append(node.id)
+        await session.flush()
+        return panel_nodes, removed
+
     async def node(self, session, node_id, include_deleted=False):
         node = await session.get(Node, int(node_id))
         if not node or node.panel_scope != self.scope or (node.deleted and not include_deleted):
@@ -64,6 +108,8 @@ class InfrastructureService:
         await session.execute(select(Node.id).where(Node.id == node.id).with_for_update())
         active = (await session.execute(select(Job.kind).where(Job.node_id == node.id,
             Job.status.in_(['pending', 'running'])))).scalars().all()
+        if kind.startswith('gemini_') and any(item.startswith('gemini_') for item in active):
+            raise ValueError('Настройка Gemini для этой ноды уже ожидает выполнения')
         if active and (kind == 'provision' or 'provision' in active):
             raise ValueError('Дождитесь завершения установки ноды перед новым заданием')
         job = Job(node_id=node.id, deployment_id=deployment.id, kind=kind, requested_by=admin_id)
@@ -141,10 +187,7 @@ class InfrastructureService:
                 item.state = 'superseded'
         else:
             names = [n['name'] for n in all_panel] + [n.name for n in await self.nodes(session)]
-            max_number = max([int(m[1]) for name in names if (m := re.match(r'^node(\d+)(?:\b|\s)', name, re.I))] or [0])
-            old = await app_settings_dal.get_setting(session, f'infra.number.{self.scope}')
-            number = max(max_number, int(old.value) if old else 0) + 1
-            await app_settings_dal.upsert_setting(session, f'infra.number.{self.scope}', str(number))
+            number = next_node_number(names)
             node = Node(panel_scope=self.scope, name=f"node{number} ({values['country']})",
                         country=values['country'], provider_uuid=values['provider_uuid'],
                         period_days=int(values['period_days']))
@@ -364,10 +407,14 @@ class InfrastructureService:
         node.deleted = True  # keep deployment/test history
 
     async def snapshot(self, session, node_id=None, admin_id=None):
-        nodes = [await self.node(session, node_id)] if node_id else await self.nodes(session)
+        nodes = [await self.node(session, node_id, include_deleted=True)] if node_id else await self.nodes(session)
         sections = []
         for node in nodes:
             deployment = await self.deployment(session, node.id)
+            if not deployment:
+                deployment = (await session.execute(select(Deployment).where(
+                    Deployment.node_id == node.id, Deployment.state.notin_(['replaced', 'superseded']))
+                    .order_by(Deployment.id.desc()).limit(1))).scalar_one_or_none()
             if not deployment:
                 continue
             password = self.cipher().decrypt(deployment.credentials.encode()).decode()
@@ -391,7 +438,7 @@ class InfrastructureService:
         translate = await admin_translator(self, session, admin_id)
         return [translate('infra_no_saved_access')]
 
-    async def publish_snapshots(self, all_admins=True, admin_id=None):
+    async def publish_snapshots(self, all_admins=True, admin_id=None, force_new=False):
         async with self._snapshot_lock:
             for recipient in (self.settings.ADMIN_IDS if all_admins else [admin_id]):
                 try:
@@ -404,15 +451,15 @@ class InfrastructureService:
                         previous = json.loads(row.value) if row else []
                         ids = []
                         for index, content in enumerate(texts):
-                            old_id = previous[index] if index < len(previous) else None
+                            old_id = previous[index] if not force_new and index < len(previous) else None
                             if old_id:
                                 try:
-                                    await self.bot.edit_message_text(content, chat_id=recipient, message_id=old_id)
+                                    await self.bot.edit_message_text(content, chat_id=recipient, message_id=old_id, parse_mode='HTML')
                                     ids.append(old_id); continue
                                 except Exception as exc:
                                     if 'message is not modified' in str(exc):
                                         ids.append(old_id); continue
-                            sent = await self.bot.send_message(recipient, content)
+                            sent = await self.bot.send_message(recipient, content, parse_mode='HTML')
                             ids.append(sent.message_id)
                         for old_id in previous[len(texts):]:
                             try:
@@ -424,6 +471,8 @@ class InfrastructureService:
                         await session.commit()
                 except Exception:
                     logging.warning('Cannot deliver infrastructure credentials to admin %s', recipient)
+                    if force_new:
+                        raise RuntimeError('Не удалось отправить SSH-доступы. Проверьте сохранённые доступы и ключ шифрования.') from None
 
     async def start(self):
         if not self.settings.INFRA_SSH_PRIVATE_KEY:
@@ -527,6 +576,8 @@ class InfrastructureService:
             return
         self._last_billing_check = time.monotonic()
         async with self.factory() as session:
+            await self.sync_removed_nodes(session)
+            await session.commit()
             config = await read_config(session)
             billing = await self.api.billing()
             providers = {p['uuid']: p['name'] for p in await self.api.providers()}
@@ -575,4 +626,14 @@ class InfrastructureService:
                             await session.commit()
                         await self.api.call('PATCH', '/hosts', dict(saved['after'], uuid=node.host_uuid))
                         node.excluded_tg = True
+            try:
+                from .gemini import detect_panel_selected_gemini
+                gemini_jobs = await detect_panel_selected_gemini(self, session, await self.nodes(session))
+            except Exception:
+                logging.exception('Gemini inbound synchronization check failed')
+                gemini_jobs = []
             await session.commit()
+        if gemini_jobs:
+            from .job_messages import publish_job
+            for job_id in gemini_jobs:
+                await publish_job(self, job_id)

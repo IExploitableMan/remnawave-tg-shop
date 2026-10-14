@@ -258,3 +258,107 @@ guard passed. Gemini HTML did not contain the country-refusal phrase; actual
 account testing remains the owner's check. A fresh private 24-hour link was
 prepared. Backups/rollback and full evidence are in the WARP pilot document and
 /tmp/infra-warp-95. Production and server-quality benchmarks were untouched.
+
+## Gemini routing integration, 2026-10-14
+
+The API feasibility test on the 3.4.5 test panel and node 95.182.88.203 was
+completed before implementation: a cloned profile and inbound were assigned to
+the same node and host, the replacement inbound was added to the original
+squads, an existing VLESS client reached Gemini, and rollback restored the
+original node/host configuration. During core reload, two probes failed for
+roughly 1–2 seconds; the steady-state client recovered without a subscription
+refresh. Full evidence remains under `/tmp/infra-warp-95/`.
+
+Implementation checks on 2026-10-14:
+
+| Check | Execution and observed result | Status |
+| --- | --- | --- |
+| Local suite | 144 tests passed, 16 database-dependent tests skipped by the configured test environment | PASS |
+| Python and locale validation | `compileall` and RU/EN JSON parsing | PASS |
+| Ansible | `gemini.yml` syntax check | PASS |
+| Test bot deployment | Empty-queue check, source backup, bot-only update, migration command, running container and Telegram polling | PASS |
+| Test panel profile integration | Bot container read the real panel 3.x profile and generated a Gemini-only route; the Psiphon endpoint matched the pilot's `127.0.0.1:1080` | PASS |
+
+The first queued enable attempt stopped safely at the Psiphon preflight because
+the service did not yet exist; the node and host profile remained unchanged.
+The playbook preflight was corrected to treat a missing service as an install
+case. The successful retry created `Acceptance WARP Pilot-GEMINI`, then the bot
+worker enabled and disabled the route on `node1` at 104.252.89.173:
+
+| Check | Execution and observed result | Status |
+| --- | --- | --- |
+| Enable through infrastructure worker | Job 33 installed Psiphon and switched the node and same host to the Gemini profile/inbound | PASS |
+| Host preservation | Host UUID, address, port, path, SNI, TLS fields, enabled state and node binding were identical before and after enable | PASS |
+| Restore through infrastructure worker | Job 34 restored the original profile, inbound and host inbound; comparison against saved baseline succeeded | PASS |
+| Psiphon binding | Service is active on the node; TCP 1080 listens only on loopback | PASS |
+| Final queue/state | No pending/running jobs; Gemini state is disabled | PASS |
+
+The Psiphon service remains installed and active on this test node for later
+checks; it binds to loopback and is not publicly exposed. The profile and inbound
+modifier remain in the test panel for reuse. No external VLESS client request was
+run on node 104 during this pair; earlier real-client success on the 95.* pilot
+is documented above. No server-quality or speed suite was run. Only the
+authorized test bot on 154.86.119.144 and its test panel/node were touched;
+production was untouched.
+
+## Live deployment and migration/Gemini follow-up, 2026-10-14
+
+Only the authorized test bot `@cridpugbot` and test infrastructure were used.
+The final code was deployed to 154.86.119.144 with matching hashes for 423 files;
+Alembic advanced to `0017_infra_active_node_names`. The bot is running, with no
+container restarts observed. Backups of panel, bot and legacy databases, source,
+configuration, keys and reports are under `/root/infra-20261014-update-backup`.
+
+The restored legacy database was placed in a separate `infra-upgrade-20261014`
+Compose project with its own panel and bot databases. Node addresses in this copy
+were changed to the documentation-only 192.0.2.1 address before starting the panel,
+so it could not push configurations to the real nodes. Panel 2.8.1 was tested,
+then the same database and fixture were upgraded to panel 3.4.5. The panel URL
+used by the fixture remained unchanged across the upgrade.
+
+| Check | Observed result | Status |
+| --- | --- | --- |
+| Final automated suite | 161 tests, including PostgreSQL integration, migrations, profile rollback, panel detection and archived-name reuse; no skips | PASS |
+| Legacy subscriptions | Actual combined base/add-on activation and renewal, base extension, Telegram lookup, disable/enable, reset traffic, device create/list/remove and accessible hosts | PASS |
+| Migration preservation | User status, expiry, traffic counters/limits, short subscription identifiers/URLs, hosts, profiles, squads and node UUIDs matched the saved baseline | PASS |
+| Existing bot references | Base/add-on UUID references stored before migration remained usable after numeric-ID API migration | PASS |
+| New 3.x users | Numeric-ID creation and idempotent deletion through the bot panel service | PASS |
+| Gemini on both panel APIs | Actual profile creation, switching the same host and two active inbounds, restoring the original profile/host, and compensation after an injected host-switch failure; SSH installation mocked for these isolated API cases | PASS |
+| Old node core compatibility | SOCKS configuration accepted by Xray 26.6.27 from the official node 2.8.0 image; validation only, no replacement of a running node | PASS |
+| Actual worker enable | Job 35 installed/reconfigured Psiphon in automatic mode and enabled routing on node1 at 104.252.89.173 | PASS |
+| Unchanged VLESS client | Client created before enable remained unchanged; authenticated requests exited through the node, and Google detected SG through the selected route | PASS |
+| Worker restore | Jobs 36 and 39 restored the original node profile/inbounds and host UUID/address/port/path/SNI/security/enable/binding fields | PASS |
+| Panel-side selection | A direct panel API selection on the same node/host was detected by the running worker, which queued and completed job 37 | PASS |
+| Missing SSH | A disposable panel-selected Gemini node caused an access request to the administrator, with no installation queued | PASS |
+| All credentials | Explicit request sent a fresh HTML export to the authorized test administrator | PASS |
+| External panel deletion | Disposable node disappeared from the active list; billing was absent; encrypted access, operation history and report fixture survived; English archive card exposed credentials and both histories | PASS |
+| Numbering | Bare `node2` is recognized; next number is current maximum + 1. Partial unique index allows an archived name to be reused while retaining its history | PASS |
+| Native Gemini facts | On 104, the reviewed IPRegion Google/Gemini functions returned IPv4 Google FR and Gemini Supported Yes; IPv6 Google IR was returned but supported-region result was unavailable | PARTIAL |
+
+Live checks found and fixed two compatibility bugs: profile copies must give every
+inbound a unique tag and remap inherited inbound routing references; deleting a
+panel node can cascade to billing, while a subsequent billing DELETE returns
+500/A138 instead of 404. Synchronization now checks the complete current billing
+list before attempting deletion. A failed cleanup with an existing billing record
+still fails safely. The panel-selection marker is reset on disable or selection
+changes so a subsequent panel-side enable is not blocked by stale queue state.
+
+During the real client transition, 23 of 25 requests succeeded and two failed.
+The observed gap between successful samples was 8.05 seconds, including the
+timeouts of the failed requests. No subscription refresh or client configuration
+change was required, but switching is not interruption-free.
+
+The native verdict is the script's supported-region check, not an authenticated
+Google account interaction. No new authenticated Gemini/AI Studio browser test was
+performed; the owner's earlier account-level pilot success remains separate evidence.
+No speed, CPU, disk, steal or IP-quality suites were rerun. The archive report was
+an explicitly labelled storage fixture, not a measured diagnostic result.
+
+Final state: node1's original profile/host is restored, its Gemini state is disabled,
+the temporary client process/account is removed, and the isolated migration stack
+is stopped with its databases/backups retained. Psiphon remains installed on the
+test nodes, with the managed endpoint on 104 in automatic mode and loopback-only.
+The original 95.* pilot remains available. Source scripts/evidence are in local
+`/tmp/infra-live-audit`; server fixture snapshots are in
+`/opt/infra-upgrade-20261014` and
+`/opt/remnawave-panel-acceptance/infra-data/live-audit-20261014`.

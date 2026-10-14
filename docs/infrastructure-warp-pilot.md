@@ -123,3 +123,47 @@ Panel rollback: /root/warp-pilot95-rollback.py; it restores original inbound,
 SNI and fingerprint settings and removes only this pilot's added bindings.
 Node backup: /root/warp-pilot-backup on 95.182.88.203.
 Evidence and reusable parameterized copies: /tmp/infra-warp-95.
+
+### Owner feedback and broader Google routing trial
+
+The owner confirmed that the Gemini mobile application works through pilot95,
+but Gemini web still refuses the location and AI Studio fails to list models
+with "User location is not supported for the API use". Anonymous HTTP success
+therefore does not establish authenticated service availability.
+
+A temporary trial extends the marked WARP rule to google.com, googleapis.com,
+googleusercontent.com, gstatic.com, googlevideo.com and ggpht.com. This tests
+whether mixed direct/WARP Google dependencies cause the discrepancy; the cause
+is not yet established. Existing node/host identities, SNI and fingerprint are
+unchanged. The pre-trial config is preserved privately as
+infra-data/warp-pilot-95/before-google-domain-trial.json on the test panel.
+Authenticated web/model-list verification remains with the owner.
+
+### Psiphon pilot on node77
+
+WARP returned a country classification of Russia in Gemini's own UI. A separate
+Psiphon tunnel was installed on the same foreign node, requested region DE,
+loopback-only SOCKS on 127.0.0.1:1080, no HTTP listener, and watchdog throughput
+sampling set to the no-download mode. The first Psiphon exit was classified as RU
+by Google's check and Gemini refused it. Manual rotation selected a new exit where
+Psiphon and Google's own country verdict both said DE, and the built-in Gemini
+check passed.
+
+The pilot Remnawave profile now routes TCP for Google domains through the Psiphon
+SOCKS outbound. Matching UDP is sent to BLOCK because Psiphon SOCKS does not
+support UDP; browsers may fall back from QUIC to TCP. WARP remains configured as
+a separate outbound. The profile change does not affect other nodes.
+
+A real VLESS client and an isolated browser confirmed that Gemini displays
+"Germany — From your IP address" and loads its workspace through this route.
+AI Studio initially returned 403 while the owner had the client tunnel disabled.
+After enabling the tunnel, the owner confirmed AI Studio can list models and send
+a prompt. The failing `alkalimakersuite-pa.clients6.google.com` request was
+already covered by `domain:clients6.google.com`; no additional host rule was
+needed.
+
+Install script reviewed and saved privately at /tmp/infra-warp-95/psiphon_install.sh
+(SHA-256 5903f1077997c716adf34dc60e4f3c47afa2c5bdb3e979c6ebf256f33f9f3a34).
+Remote Psiphon files and config backup are under /root/psiphon-pilot-backup on
+95.182.88.203; panel rollback config is stored privately in
+infra-data/warp-pilot-95/before-psiphon-integration.json. No benchmark was run.

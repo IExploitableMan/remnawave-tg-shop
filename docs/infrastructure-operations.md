@@ -251,6 +251,21 @@ revalidates it. Opening the screen does not run Ansible.
 Migration 0016 persists progress/completion message IDs, start time and confirmed
 upgrade target. Verification: 137 local tests and two real queued operational
 checks passed on the dedicated test bot on 2026-10-13. See the acceptance log.
-WARP/Psiphon integration is deferred at the owner's request.
+WARP integration is deferred. Psiphon/Gemini routing is implemented for panel
+2.x and 3.x and verified on the dedicated test stand; see the acceptance log.
+
+Gemini enable uses the existing host's inbound, installs the loopback-only proxy,
+and assigns a checked copy of the profile while retaining all active inbounds.
+Missing SSH access opens the credential flow. The installer uses automatic exit
+selection instead of a fixed country. Panel-side Gemini selection is checked
+periodically; missing access triggers a notification rather than an installation.
+Disabling restores the recorded original profile and host binding. A core reload
+can interrupt connections briefly; the unchanged client was observed to recover
+with an 8.05-second gap between successful HTTP samples on the test stand.
+
+Node deletions in the panel archive the local node and retain access/tests/history.
+Current billing is checked before deletion because some panels return 500 for a
+record already removed by cascade. Migration 0017 makes node names unique only
+among active records, so archived names do not reserve the next node number.
 
 Final checkpoint-count polish: 56 focused infrastructure tests passed, including legacy extra-result handling. The diagnostic catalog is version 3. This changes rendering/progress bookkeeping only; no remote benchmark was run.

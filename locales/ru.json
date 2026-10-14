@@ -993,5 +993,10 @@
   "infra_snapshot_replaced": "Список доступов обновлён в предыдущем сообщении.",
   "infra_billing_overdue": "дата оплаты прошла",
   "infra_billing_remaining": "до оплаты {p0} ч",
-  "infra_billing_reminder": "{p0}: {p1}\nПровайдер: {p2}\n{p3}"
+  "infra_billing_reminder": "{p0}: {p1}\nПровайдер: {p2}\n{p3}",
+  "infra_tg_hide": "🙈 Скрыть host для tg",
+  "infra_tg_show": "👁 Показать host для tg",
+  "infra_tg_choose_host": "Выберите host для переключения доступа tg",
+  "infra_tg_no_host": "У ноды нет связанных hosts",
+  "infra_tg_squad_required": "Выберите squad tg в настройках инфраструктуры"
 }

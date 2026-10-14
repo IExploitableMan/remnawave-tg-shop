@@ -269,3 +269,7 @@ record already removed by cascade. Migration 0017 makes node names unique only
 among active records, so archived names do not reserve the next node number.
 
 Final checkpoint-count polish: 56 focused infrastructure tests passed, including legacy extra-result handling. The diagnostic catalog is version 3. This changes rendering/progress bookkeeping only; no remote benchmark was run.
+
+### Manual tg host visibility
+
+The node card reads the current panel host restrictions and toggles only the configured tg squad. Other squad restrictions, inbound settings and host disabled state remain unchanged. Multiple linked hosts require explicit selection when there is no recorded primary host. Manual hiding is retained on renewal; renewal restores only restrictions saved by the expiry worker. The Excluded Internal Squads property belongs to hosts in Panel API 2.x, and is represented by internalSquads in API 3.x.

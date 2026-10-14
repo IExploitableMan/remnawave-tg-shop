@@ -992,5 +992,10 @@
   "infra_snapshot_replaced": "The access list was updated in the preceding message.",
   "infra_billing_overdue": "payment date has passed",
   "infra_billing_remaining": "payment due in {p0}h",
-  "infra_billing_reminder": "{p0}: {p1}\nProvider: {p2}\n{p3}"
+  "infra_billing_reminder": "{p0}: {p1}\nProvider: {p2}\n{p3}",
+  "infra_tg_hide": "🙈 Hide host from tg",
+  "infra_tg_show": "👁 Show host to tg",
+  "infra_tg_choose_host": "Choose a host to toggle tg access",
+  "infra_tg_no_host": "No hosts linked to this node",
+  "infra_tg_squad_required": "Select the tg squad in infrastructure settings"
 }

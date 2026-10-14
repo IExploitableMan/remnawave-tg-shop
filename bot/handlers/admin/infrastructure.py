@@ -84,7 +84,12 @@ async def card(callback, service, session, node_id):
         text_value += tr('infra_unknown_deadline')
     if not node.host_automation:
         text_value += tr('infra_access_only_mode')
-    text_value += tr('infra_tg_access') + (tr('infra_excluded') if node.excluded_tg else tr('infra_not_excluded'))
+    config = await read_config(session)
+    tg_visible = None
+    if config['tg_squad_uuid']:
+        tg_visible, tg_hosts = await service.tg_host_access(session, node)
+        text_value += (tr('infra_tg_access') + tr('infra_not_excluded' if tg_visible else 'infra_excluded')
+            if tg_visible is not None else '\n' + tr('infra_tg_choose_host'))
     gemini_row = await app_settings_dal.get_setting(session, f'infra.gemini.{service.scope}.{node.id}')
     gemini_state = json.loads(gemini_row.value) if gemini_row and gemini_row.value else {}
     gemini_enabled = bool(gemini_state.get('enabled') and deployment
@@ -100,6 +105,8 @@ async def card(callback, service, session, node_id):
                (tr('infra_upgrade'), f'infra:upgrade:{node.id}'),
                (tr('infra_edit_access'), f'infra:edit:{node.id}'),
                (tr('infra_change_sni'), f'infra:sni:{node.id}'), (tr('infra_delete'), f'infra:delete:{node.id}')] + back()
+    if config['tg_squad_uuid']:
+        buttons.insert(-1, (tr('infra_tg_hide' if tg_visible else 'infra_tg_show') if tg_visible is not None else tr('infra_tg_choose_host'), f'infra:tg_toggle:{node.id}'))
     if not gemini_enabled or gemini_revert_available:
         buttons.insert(-6, (tr('infra_gemini_disable' if gemini_enabled else 'infra_gemini_enable'),
             f"infra:gemini_{'disable' if gemini_enabled else 'enable'}:{node.id}"))
@@ -329,6 +336,23 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             node = await service.adopt(session, argument)
             await session.commit()
             await card(callback, service, session, node.id)
+        elif action in {'tg_toggle', 'tg_host'}:
+            node_id = argument
+            host_uuid = parts[3] if len(parts) > 3 else None
+            node = await service.node(session, node_id)
+            visible, hosts = await service.tg_host_access(session, node, host_uuid or None,
+                toggle=action == 'tg_host' or bool(node.host_uuid))
+            if action == 'tg_toggle' and not node.host_uuid and len(hosts) == 1:
+                visible, hosts = await service.tg_host_access(session, node, hosts[0]['uuid'], toggle=True)
+            if visible is None:
+                if not hosts:
+                    raise ValueError(tr('infra_tg_no_host'))
+                await show(callback, tr('infra_tg_choose_host'), [
+                    (h.get('remark') or h.get('address') or h['uuid'], f"infra:tg_host:{node.id}:{h['uuid']}")
+                    for h in hosts] + back(f'infra:node:{node.id}'))
+            else:
+                await session.commit()
+                await card(callback, service, session, node.id)
         elif action == 'node':
             await card(callback, service, session, argument)
         elif action in {'new', 'replace'}:

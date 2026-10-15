@@ -217,14 +217,12 @@ class BridgeCreationTests(unittest.IsolatedAsyncioTestCase):
         await add_profile_sni(self.api, 'profile', 'cdn.google.com')
         self.assertEqual(self.api.order, ['GET /config-profiles/profile'])
 
-    async def test_profile_without_wildcard_is_refused(self):
+    async def test_profile_without_wildcard_creates_wildcard(self):
         self.api = FakeBridgePanel(wildcard=False)
         self.service.api = self.api
-        with self.assertRaisesRegex(ValueError, 'VLESS-WILDCARD'):
-            await create_bridge(self.service, SimpleNamespace(id=1, panel_uuid='node', name='node1 (DE)', host_uuid='direct'),
-                self.deployment, dict(BRIDGE_CONFIG), 1, 'dl.google.com')
-        self.assertFalse([step for step in self.api.order
-                          if step.startswith(('PATCH', 'POST', 'DELETE'))])
+        await self.run_bridge()
+        self.assertIn('VLESS-WILDCARD', [ib['tag'] for ib in self.api.profile['inbounds']])
+        self.assertEqual(self.api.node['configProfile']['activeInbounds'], ['in-VLESS-WILDCARD'])
 
     async def test_second_bridge_for_node_is_refused(self):
         self.api.hosts.append({'uuid': 'other-bridge', 'address': 'bridge.example.net',

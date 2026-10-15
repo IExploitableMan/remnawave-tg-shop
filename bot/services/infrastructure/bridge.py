@@ -6,7 +6,7 @@ from db.models import InfrastructureDeployment as Deployment
 from .gemini import (parse_config, read_profile, switch_profile, _panel_node_host,
     linked_hosts, active_inbound_ids, find_inbound, create_or_reuse_gemini_inbound,
     add_inbound_to_squads, restore_squads, check_other_hosts, assert_selection_unchanged,
-    verify_connected, save_host_group_state)
+    verify_connected, save_host_group_state, inbound_uuid_by_tag)
 from .settings import validate_hostname
 
 WILDCARD_TAG = 'VLESS-WILDCARD'
@@ -23,8 +23,50 @@ def _host_nodes(host):
 def _wildcard_uuid(profile):
     for item in profile.get('inbounds') or []:
         if item.get('tag') == WILDCARD_TAG:
-            return item['uuid']
-    raise ValueError(f'В профиле панели нет inbound {WILDCARD_TAG}')
+            return item.get('uuid')
+    return None
+
+
+def prepare_wildcard_config(original_config, source_tag, sni=None):
+    config = copy.deepcopy(original_config)
+    source = find_inbound(config, source_tag)
+    existing = next((item for item in config.get('inbounds') or [] if item.get('tag') == WILDCARD_TAG), None)
+    if existing:
+        return config, WILDCARD_TAG
+    wildcard = copy.deepcopy(source)
+    wildcard['tag'] = WILDCARD_TAG
+    if 'gemini' in source_tag.casefold():
+        stream = wildcard.get('streamSettings') or {}
+        stream.pop('sockopt', None)
+    reality = (wildcard.get('streamSettings') or {}).get('realitySettings') or {}
+    server_names = list(reality.get('serverNames') or [])
+    if sni and sni not in server_names:
+        server_names.append(sni)
+    if reality:
+        reality['serverNames'] = server_names
+    config['inbounds'].append(wildcard)
+    return config, WILDCARD_TAG
+
+
+async def create_or_reuse_wildcard_inbound(api, profile_uuid, source_inbound_uuid, sni=None):
+    profile = await read_profile(api, profile_uuid)
+    wildcard_uuid = _wildcard_uuid(profile)
+    if wildcard_uuid:
+        return profile, wildcard_uuid
+    original_config = parse_config(profile.get('config'))
+    source = next((item for item in profile.get('inbounds') or [] if item.get('uuid') == source_inbound_uuid), None)
+    if not source:
+        raise ValueError('Не удалось определить inbound исходного профиля')
+    config, tag = prepare_wildcard_config(original_config, source['tag'], sni)
+    await api.call('PATCH', '/config-profiles', {'uuid': profile_uuid, 'config': config})
+    updated_profile = await read_profile(api, profile_uuid)
+    wildcard_uuid = _wildcard_uuid(updated_profile)
+    if not wildcard_uuid:
+        raise RuntimeError('Панель не подтвердила создание VLESS-WILDCARD в профиле')
+    for inbound in profile.get('inbounds') or []:
+        if inbound_uuid_by_tag(updated_profile, inbound['tag']) != inbound['uuid']:
+            raise RuntimeError('Панель изменила UUID существующего inbound; проверьте привязки hosts')
+    return updated_profile, wildcard_uuid
 
 
 def _reality_by_tag(config, tag):
@@ -144,11 +186,11 @@ async def create_bridge(service, node, deployment, config, job_id, sni):
     if not wildcard_profile or not previous_inbounds:
         raise ValueError('Не удалось определить текущий профиль ноды')
     profile = await read_profile(api, wildcard_profile)
-    wildcard_uuid = _wildcard_uuid(profile)
     source_id = (direct_host.get('inbound') or {}).get('configProfileInboundUuid')
-    source_tag = next((i['tag'] for i in profile.get('inbounds') or [] if i['uuid'] == source_id), None)
     if source_id not in previous_inbounds or (direct_host.get('inbound') or {}).get('configProfileUuid') != wildcard_profile:
         raise ValueError('Прямой host не использует активный inbound ноды')
+    profile, wildcard_uuid = await create_or_reuse_wildcard_inbound(api, wildcard_profile, source_id, sni)
+    source_tag = next((i['tag'] for i in profile.get('inbounds') or [] if i['uuid'] == source_id), None)
     source_config = parse_config(profile.get('config'))
     source_body = find_inbound(source_config, source_tag)
     verify_listener_compatibility(source_body, find_inbound(source_config, WILDCARD_TAG))

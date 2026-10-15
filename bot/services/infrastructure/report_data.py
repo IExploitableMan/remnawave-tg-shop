@@ -1,0 +1,261 @@
+"""Conservative adapters for diagnostic tables; original output stays in JSON."""
+import re
+import json
+from collections import Counter
+
+SPEED = re.compile(r'([0-9]+(?:\.[0-9]+)?)\s*(Mbps|[MG]bits/sec|[MG]bit/s|[MG]B/s)\b')
+
+
+def columns(line):
+    return [part.strip() for part in re.split(r'\s{2,}|\t+|\s*\|\s*', line.strip()) if part.strip()]
+
+
+def service_status(value):
+    if re.search(r'\bblock(?:ed)?\b|denied|failed|banned|restricted|\bno\b|timeout|reset', value, re.I):
+        return 'bad'
+    if re.search(r'VeryHigh|HighRisk|Suspicious|Risky', value, re.I):
+        return 'bad'
+    if re.search(r'NF.?Only|No.?Prem|discrepant|high|medium|elevated', value, re.I):
+        return 'warn'
+    if value.strip() in ('N/A', '-', '?', 'Unknown'):
+        return 'unknown'
+    return 'ok'
+
+
+def parse_result(result):
+    output = result['output']
+    kind = result.get('id', '')
+    facts, services, bars, disk = [], [], [], []
+    lines = output.splitlines()
+    families, family = [], ''
+    for line in lines:
+        if 'IP QUALITY CHECK REPORT:' in line:
+            address = line.split('REPORT:', 1)[1].strip()
+            family = 'IPv6' if ':' in address else 'IPv4'
+        families.append(family)
+    # System and benchmark headings use stable key:value labels.
+    keys = {'Processor': 'CPU', 'CPU Model': 'CPU', 'CPU cores': 'Ядер', 'CPU Cores': 'Ядер',
+            'RAM': 'RAM', 'Total RAM': 'RAM', 'Disk': 'Диск', 'Total Disk': 'Диск',
+            'TCP Congestion Control': 'CC', 'I/O Speed(average)': 'I/O', 'ASN': 'ASN',
+            'Organization': 'Сеть', 'events per second': 'CPU events/s',
+            'Single Core': 'Geekbench single', 'Multi Core': 'Geekbench multi'}
+    for offset, line in enumerate(lines):
+        match = re.match(r'^\s*([^:]+):\s*(.+?)\s*$', line)
+        if match and match[1].strip() in keys:
+            label = keys[match[1].strip()]
+            facts.append((f'{label} {families[offset]}'.strip(), match[2]))
+    if kind == 'yabs':
+        blocks, disk_values = [], {}
+        for line in lines:
+            row = columns(line)
+            if row and row[0] in ('Single Core', 'Multi Core') and len(row) > 1:
+                facts.append((keys[row[0]], row[1]))
+            if row and row[0] == 'Block Size':
+                blocks = [cell.split()[0] for cell in row[1:]]
+            elif row and row[0] in ('Read', 'Write') and blocks:
+                for block, cell in zip(blocks, row[1:]):
+                    speed = re.search(r'([0-9.]+)\s*([KMG]B/s)', cell)
+                    if speed:
+                        value = float(speed[1]) * {'KB/s': 0.001, 'MB/s': 1, 'GB/s': 1000}[speed[2]]
+                        disk_values.setdefault(block, {})[row[0].lower()] = value
+            elif 'Network Speed Tests' in line:
+                blocks = []
+        disk = [{'label': block, **values} for block, values in disk_values.items()]
+        for row in disk:
+            if row['label'] in ('4k', '1m') and 'read' in row and 'write' in row:
+                facts.append((f"fio {row['label']} R/W", f"{row['read']:g}/{row['write']:g} MB/s"))
+    if kind in ('udp', 'sustained'):
+        try:
+            raw = json.loads(output)
+            if isinstance(raw, dict):
+                if raw.get('error'):
+                    facts.append(('Ошибка измерения', str(raw['error'])))
+                end = raw.get('end') or {}
+                for key, label in (('sum_sent', 'Передано'), ('sum_received', 'Принято'), ('sum', 'Итого')):
+                    values = end.get(key) or {}
+                    for field, suffix, unit, scale in (
+                            ('bits_per_second', '', 'Mbps', 1000000),
+                            ('lost_percent', 'потери', '%', 1),
+                            ('jitter_ms', 'jitter', 'ms', 1)):
+                        value = values.get(field)
+                        if isinstance(value, (int, float)):
+                            facts.append((f'{label} {suffix}'.strip(), f'{value / scale:.2f} {unit}'))
+        except (ValueError, TypeError):
+            pass
+    if kind == 'ipregion':
+        for line in lines:
+            if line.strip() == 'Legend':
+                break
+            row = columns(line)
+            if (len(row) >= 2 and len(row[0]) <= 35 and re.match(r'^[A-Za-z0-9]', row[0])
+                    and not re.search(r'[:/\\]|checking|made with', row[0], re.I)
+                    and row[0] not in ('Service', 'Code', 'Country', 'IPv4', 'IPv6')
+                    and re.match(r'^(?:[A-Z]{2}\b|Yes\b|No\b|N/A|Blocked|Available|Unknown)', row[1])):
+                value = ' / '.join(row[1:3])
+                status = service_status(value)
+                if 'Search Captcha' in row[0]:
+                    status = 'ok' if row[1] == 'No' else ('bad' if row[1] == 'Yes' else 'unknown')
+                services.append({'label': row[0], 'value': value, 'status': status})
+        regions = Counter(s['value'].split(' / ')[0] for s in services if re.fullmatch(r'[A-Z]{2}', s['value'].split(' / ')[0]))
+        if regions:
+            country, count = regions.most_common(1)[0]
+            facts += [('Консенсус', country), ('Совпадений', f'{count}/{sum(regions.values())}')]
+    elif kind in ('ipcheck', 'ipquality'):
+        # Multiple matrices may appear; process each Service row independently.
+        for offset, line in enumerate(lines):
+            if not re.match(r'^\s*Service:', line):
+                continue
+            header = line.split(':', 1)[1]
+            matches = list(re.finditer(r'\S+', header))
+            names = [m[0] for m in matches]
+            centers = [(m.start()+m.end())/2 for m in matches]
+            boundaries = [0] + [int((a+b)/2) for a,b in zip(centers, centers[1:])] + [max(len(header), 1000)]
+            status, regions = [], []
+            for following in lines[offset+1:offset+7]:
+                if re.match(r'^\s*Status:', following):
+                    status = following.split(':', 1)[1].split()
+                elif re.match(r'^\s*Region:', following):
+                    body = following.split(':', 1)[1]
+                    regions = [body[left:right].strip() for left,right in zip(boundaries,boundaries[1:])]
+            for index, name in enumerate(names):
+                value = status[index] if index < len(status) else 'N/A'
+                region = regions[index] if index < len(regions) else ''
+                label = f'{name} [{families[offset]}]' if families[offset] else name
+                services.append({'label': label, 'value': ' · '.join(v for v in (value, region) if v and v != '-'),
+                                 'status': service_status(value)})
+        for offset, line in enumerate(lines):
+            match = re.match(r'^\s*(IP2Location|Scamalytics|ipapi|AbuseIPDB|DB-?IP|IPQS):\s*(.*)', line)
+            if match and re.search(r'\d|Low|High|Suspicious', match[2]):
+                label = f'{match[1]} [{families[offset]}]' if families[offset] else match[1]
+                services.append({'label': label, 'value': match[2].strip().replace('|', ' · '), 'status': service_status(match[2])})
+            match = re.match(r'^\s*(Usage|Company|Proxy|VPN|Tor):\s*(.*)', line)
+            if match:
+                values = columns(match[2])
+                if values:
+                    facts.append((f'{match[1]} {families[offset]}'.strip(), Counter(values).most_common(1)[0][0]))
+    elif kind in ('geo', 'dpi', 'tlab_censor'):
+        for line in lines:
+            match = re.match(r'^\s*([a-z0-9.-]+\.[a-z]{2,})\s+(.+)', line, re.I)
+            if match and re.search(r'available|blocked|denied|timeout|reset|\bOK\b', match[2], re.I):
+                services.append({'label': match[1], 'value': match[2].strip(), 'status': service_status(match[2])})
+    if kind in ('ru_speed', 'tlab_speed', 'yabs', 'bench'):
+        bars = network_rows(output, kind)
+        valid = [b['value'] for b in bars if b['value'] is not None]
+        if bars:
+            if valid:
+                facts.append(('Макс ↓', f"{max(valid):.1f} Mbps"))
+            facts.append(('Направлений', str(len(bars))))
+    return {'facts': list(dict.fromkeys(facts)), 'services': services, 'bars': bars, 'disk': disk}
+
+
+def speed_value(cell):
+    match = SPEED.search(cell)
+    if match:
+        multiplier = 1000 if match[2] in ('Gbits/sec', 'Gbit/s') else (8000 if match[2] == 'GB/s' else (8 if match[2] == 'MB/s' else 1))
+        return float(match[1]) * multiplier, 'ok'
+    status = re.search(r'(?i)(?:Download|Upload) failed|failed|busy|N/A|timeout', cell)
+    return None, status[0] if status else 'N/A'
+
+
+def network_rows(output, kind):
+    """Keep directions independent, including a successful upload/failed download."""
+    rows, family = [], ''
+    for line in output.splitlines():
+        if 'Network Speed Tests (IPv' in line:
+            family = 'IPv6' if '(IPv6)' in line else 'IPv4'
+        if re.search(r'^(?:\s*)(?:Read|Write|Total|Block Size|Node Name|Provider)\b|I/O|average|CPU|RAM', line, re.I):
+            continue
+        if not SPEED.search(line) and not re.search(r'failed|busy|N/A|timeout', line, re.I):
+            continue
+        if kind == 'yabs' and '|' not in line:
+            continue
+        parts = columns(line)
+        if not parts:
+            continue
+        send_first = kind in ('yabs', 'bench', 'tlab_speed')
+        if '|' in line and len(parts) >= 4:
+            tail = 2 if SPEED.search(parts[-1]) or re.search(r'failed|busy|N/A|timeout', parts[-1], re.I) else 3
+            label = ' · '.join(parts[:-tail])
+            first, second = parts[-tail], parts[-tail+1]
+        elif len(parts) >= 3:
+            label, first, second = parts[0], parts[1], parts[2]
+        else:
+            # Explicit failure labels can identify a missing direction even when
+            # blank columns collapse. Never use the sole success for both sides.
+            matches = list(SPEED.finditer(line))
+            failed = re.search(r'(?i)(Download|Upload) failed', line)
+            if not failed:
+                continue
+            label = line[:min(matches[0].start() if matches else failed.start(), failed.start())].strip(' |')
+            success = matches[0][0] if matches else 'N/A'
+            upload, download = (success, failed[0]) if failed[1].lower() == 'download' else (failed[0], success)
+            first, second = (upload, download) if send_first else (download, upload)
+        if not label:
+            continue
+        failed_down = re.search(r'Download failed', line, re.I)
+        failed_up = re.search(r'Upload failed', line, re.I)
+        if failed_down or failed_up:
+            success = SPEED.search(line)
+            up = 'Upload failed' if failed_up else (success[0] if success else 'N/A')
+            down = 'Download failed' if failed_down else (success[0] if success else 'N/A')
+            first, second = (up, down) if send_first else (down, up)
+        first_value, first_status = speed_value(first)
+        second_value, second_status = speed_value(second)
+        if not any(v is not None for v in (first_value, second_value)) and first_status == second_status == 'N/A':
+            continue
+        upload, download = ((first_value, second_value) if send_first else (second_value, first_value))
+        upload_status, download_status = ((first_status, second_status) if send_first else (second_status, first_status))
+        if family:
+            label += f' [{family}]'
+        rows.append({'label': label, 'value': download, 'upload': upload, 'unit': 'Mbps',
+            'download_status': download_status, 'upload_status': upload_status})
+    return rows
+
+
+def result_measurements(result):
+    data = parse_result(result)
+    metrics = {}
+    for row in data['bars']:
+        if row['value'] is not None:
+            metrics[f"{row['label']} download [Mbps]"] = row['value']
+        if row['upload'] is not None:
+            metrics[f"{row['label']} upload [Mbps]"] = row['upload']
+    for label, value in data['facts']:
+        if label in ('CPU events/s', 'Geekbench single', 'Geekbench multi'):
+            number = re.search(r'\d+(?:\.\d+)?', value)
+            if number:
+                metrics[label] = float(number[0])
+    for row in data['disk']:
+        for direction in ('read', 'write'):
+            if direction in row:
+                metrics[f"fio {row['label']} {direction} [MB/s]"] = row[direction]
+    if result.get('id') == 'cdn':
+        for line in result['output'].splitlines():
+            values = dict(re.findall(r'(connect|tls|ttfb)=([0-9.]+)', line))
+            if values and float(values.get('ttfb', 0)) > 0:
+                for label, number in values.items():
+                    metrics[f'{line.split()[0]} {label} [ms]'] = float(number) * 1000
+    if result.get('id') == 'dns':
+        resolver = None
+        for line in result['output'].splitlines():
+            if line.strip() in ('1.1.1.1', '8.8.8.8', '9.9.9.9'):
+                resolver = line.strip()
+            query = re.search(r'Query time:\s*(\d+)\s*msec', line)
+            if resolver and query:
+                metrics[f'{resolver} query [ms]'] = float(query[1])
+    if result.get('id') in ('udp', 'sustained'):
+        try:
+            raw = json.loads(result['output'])
+            for direction in ('sum', 'sum_sent', 'sum_received'):
+                values = raw.get('end', {}).get(direction, {})
+                for key, unit, scale in [('bits_per_second', 'Mbps', 1000000),
+                                         ('lost_percent', '%', 1), ('jitter_ms', 'ms', 1)]:
+                    if isinstance(values.get(key), (int, float)):
+                        metrics[f'{direction} {key} [{unit}]'] = values[key]/scale
+        except (ValueError, TypeError):
+            pass
+    if result.get('id') == 'memory':
+        match = re.search(r'\(([0-9.]+) MiB/sec\)', result['output'])
+        if match:
+            metrics['Memory [MiB/sec]'] = float(match[1])
+    return metrics

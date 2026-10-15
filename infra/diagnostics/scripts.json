@@ -1,0 +1,34 @@
+{
+  "ipregion": {
+    "url": "https://ipregion.vrnt.xyz",
+    "sha256": "abefb64b14dc1b2ab2ad9d20423b1f37e27e88dd60a05b7e62a45da05c0a94e0"
+  },
+  "censorcheck": {
+    "url": "https://raw.githubusercontent.com/vernette/censorcheck/master/censorcheck.sh",
+    "sha256": "e8e2d3a364d1e92087e1571f8bf5bad529884c79375c9002916f40be5855b9b8"
+  },
+  "tlab_censor": {
+    "url": "https://censorcheck.tlab.pw",
+    "sha256": "6cce44c3c76d1870f235776799d4e56fb4b1b08ba876b2b6cc99ea51256cb480"
+  },
+  "ru_speed": {
+    "url": "https://raw.githubusercontent.com/itdoginfo/russian-iperf3-servers/main/speedtest.sh",
+    "sha256": "068d37703beab0ec7e44a24ed45f6e911af51511ea6476a85add7250fab3d3dc"
+  },
+  "tlab_speed": {
+    "url": "https://bench.tlab.pw",
+    "sha256": "a02ff383bdb96dea984cb4f2feea77caac383070d4bbd37b088f3ebd0ac38853"
+  },
+  "yabs": {
+    "url": "https://raw.githubusercontent.com/masonr/yet-another-bench-script/master/yabs.sh",
+    "sha256": "f783214d0dcaba52779bed60a8652dad3101189cf7aff5120114aaa19795773a"
+  },
+  "ipcheck": {
+    "url": "https://IP.Check.Place",
+    "sha256": "b30df5a3c2204276c54e99dcc5080b46f8a627667730aee7de63b109b8ecaecf"
+  },
+  "bench": {
+    "url": "https://raw.githubusercontent.com/teddysun/across/master/bench.sh",
+    "sha256": "fbc7d7ec27f59939ba798f456ed3d31931c6d3d4604a63e6d563b19a4974ae04"
+  }
+}

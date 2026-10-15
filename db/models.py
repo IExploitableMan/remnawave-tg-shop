@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Float, ForeignKey, UniqueConstraint, Text, BigInteger
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Float, ForeignKey, UniqueConstraint, Text, BigInteger, Index, text
 from sqlalchemy.orm import relationship, DeclarativeBase
 from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlalchemy.sql import func
@@ -7,6 +7,14 @@ from datetime import datetime
 
 class Base(AsyncAttrs, DeclarativeBase):
     pass
+
+
+class PanelUserIdentity(Base):
+    __tablename__ = "panel_user_identities"
+    panel_scope = Column(String(64), primary_key=True)
+    panel_user_id = Column(BigInteger, primary_key=True)
+    reference = Column(String(36), nullable=False)
+    __table_args__ = (UniqueConstraint("panel_scope", "reference"),)
 
 
 class User(Base):
@@ -22,6 +30,8 @@ class User(Base):
     is_banned = Column(Boolean, default=False)
     panel_user_uuid = Column(String, nullable=True, unique=True, index=True)
     addon_panel_user_uuid = Column(String, nullable=True, unique=True, index=True)
+    panel_user_id = Column(BigInteger, nullable=True, index=True)
+    addon_panel_user_id = Column(BigInteger, nullable=True, index=True)
     referral_code = Column(String(16), nullable=True, unique=True, index=True)
     referred_by_id = Column(BigInteger,
                             ForeignKey("users.user_id"),
@@ -67,6 +77,7 @@ class Subscription(Base):
                      nullable=False,
                      index=True)
     panel_user_uuid = Column(String, nullable=False, index=True)
+    panel_user_id = Column(BigInteger, nullable=True, index=True)
     panel_subscription_uuid = Column(String,
                                      unique=True,
                                      index=True,
@@ -418,3 +429,74 @@ class AdAttribution(Base):
 
     user = relationship("User")
     campaign = relationship("AdCampaign", back_populates="attributions")
+
+
+class InfrastructureNode(Base):
+    __tablename__ = 'infrastructure_nodes'
+    id = Column(Integer, primary_key=True)
+    panel_scope = Column(String(64), nullable=False, index=True)
+    panel_uuid = Column(String(36), nullable=True)
+    host_uuid = Column(String(36), nullable=True)
+    name = Column(String(30), nullable=False)
+    country = Column(String(2), nullable=False)
+    provider_uuid = Column(String(36), nullable=False)
+    host_automation = Column(Boolean, nullable=False, default=True, server_default='true')
+    period_days = Column(Integer, nullable=False, default=30)
+    billing_uuid = Column(String(36), nullable=True)
+    excluded_tg = Column(Boolean, nullable=False, default=False)
+    previous_host_access = Column(Text, nullable=True)
+    deleted = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (Index('uq_infra_active_node_name', 'panel_scope', 'name', unique=True,
+                         postgresql_where=text('deleted = false')),
+                     UniqueConstraint('panel_scope', 'panel_uuid'))
+
+
+class InfrastructureDeployment(Base):
+    __tablename__ = 'infrastructure_deployments'
+    id = Column(Integer, primary_key=True)
+    node_id = Column(Integer, ForeignKey('infrastructure_nodes.id'), nullable=False, index=True)
+    address = Column(String(255), nullable=False)
+    host_address = Column(String(255), nullable=False)
+    ssh_port = Column(Integer, nullable=False, default=22)
+    ssh_user = Column(String(64), nullable=False, default='root')
+    credentials = Column(Text, nullable=False)  # Fernet ciphertext, never FSM/job JSON
+    host_public_key = Column(Text, nullable=True)
+    panel_address = Column(String(255), nullable=True)  # panel address when SSH access was verified
+    profile_uuid = Column(String(36), nullable=True)
+    inbound_uuid = Column(String(36), nullable=True)
+    sni = Column(String(255), nullable=True)
+    node_version = Column(String(32), nullable=False)
+    paid_until = Column(DateTime(timezone=True), nullable=True)
+    state = Column(String(32), nullable=False, default='pending')
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class InfrastructureJob(Base):
+    __tablename__ = 'infrastructure_jobs'
+    id = Column(Integer, primary_key=True)
+    node_id = Column(Integer, ForeignKey('infrastructure_nodes.id'), nullable=False, index=True)
+    deployment_id = Column(Integer, ForeignKey('infrastructure_deployments.id'), nullable=False)
+    kind = Column(String(32), nullable=False)
+    status = Column(String(32), nullable=False, default='pending', index=True)
+    stage = Column(String(64), nullable=False, default='queued')
+    requested_by = Column(BigInteger, nullable=False)
+    result = Column(Text, nullable=True)  # no credentials or remote raw shell errors
+    cancel_requested = Column(Boolean, nullable=False, default=False)
+    progress_message_id = Column(BigInteger, nullable=True)
+    completion_message_id = Column(BigInteger, nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    target_version = Column(String(32), nullable=True)
+    payload = Column(Text, nullable=True)  # JSON operation parameters, e.g. the bridge SNI
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class InfrastructureReport(Base):
+    __tablename__ = 'infrastructure_reports'
+    id = Column(Integer, primary_key=True)
+    job_id = Column(Integer, ForeignKey('infrastructure_jobs.id'), nullable=False, unique=True)
+    deployment_id = Column(Integer, ForeignKey('infrastructure_deployments.id'), nullable=False, index=True)
+    level = Column(String(16), nullable=False)
+    manifest = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

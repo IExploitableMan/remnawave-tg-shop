@@ -1,0 +1,60 @@
+---
+- name: Prepare the private Psiphon SOCKS endpoint for Gemini routing
+  hosts: node
+  gather_facts: true
+  become: true
+  tasks:
+    - name: Check supported operating system
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution in ['Debian', 'Ubuntu']
+          - (ansible_distribution == 'Debian' and ansible_distribution_major_version in ['12', '13']) or (ansible_distribution == 'Ubuntu' and ansible_distribution_version == '24.04')
+        fail_msg: Unsupported operating system
+
+    - name: Install curl for the pinned Psiphon installer
+      ansible.builtin.apt:
+        name: [ca-certificates, curl]
+        state: present
+        update_cache: true
+
+    - name: Install pinned vps-psiphon installer
+      ansible.builtin.get_url:
+        url: https://raw.githubusercontent.com/Chara-Freedom/vps-psiphon/main/psiphon_install.sh
+        dest: /usr/local/sbin/psiphon_install.sh
+        checksum: sha256:5903f1077997c716adf34dc60e4f3c47afa2c5bdb3e979c6ebf256f33f9f3a34
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Check whether Psiphon is active on the private Docker gateway
+      ansible.builtin.shell: >-
+        if systemctl is-active --quiet vps-psiphon.service
+        && grep -qx 'EGRESS_REGION=' /etc/default/vps-psiphon
+        && /usr/bin/python3 -c "import socket; s=socket.create_connection(('127.0.0.1',1080),2); s.close()";
+        then echo ready; else echo missing; fi
+      register: psiphon_ready
+      changed_when: false
+      failed_when: false
+
+    - name: Install Psiphon SOCKS with no public HTTP proxy or bulk-download watchdog
+      ansible.builtin.command:
+        argv:
+          - /usr/local/sbin/psiphon_install.sh
+          - --region
+          - ''
+          - --no-http
+          - --bulk-test-mb
+          - '0'
+          - --bind-loopback
+      when: psiphon_ready.stdout.strip() != 'ready'
+      no_log: true
+
+    - name: Verify Psiphon service
+      ansible.builtin.command: systemctl is-active --quiet vps-psiphon.service
+      changed_when: false
+
+    - name: Verify local SOCKS listener
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 1080
+        timeout: 30

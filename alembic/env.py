@@ -13,7 +13,8 @@ from db.models import Base
 
 config = context.config
 
-if config.config_file_name is not None:
+if config.config_file_name is not None and config.attributes.get('connection') is None:
+    # Embedded startup migrations must preserve the bot's logging configuration.
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata

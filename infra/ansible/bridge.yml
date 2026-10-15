@@ -1,0 +1,75 @@
+---
+- name: Manage one SNI bridge route on the shared haproxy fronting server
+  hosts: node
+  gather_facts: false
+  become: true
+  vars:
+    bridge_directory: /opt/remnanode
+    bridge_list: "{{ bridge_directory }}/sni.txt"
+  tasks:
+    - name: Check the SNI list exists
+      ansible.builtin.stat:
+        path: "{{ bridge_list }}"
+      register: bridge_stat
+
+    - name: Refuse to continue without the SNI list
+      ansible.builtin.assert:
+        that: bridge_stat.stat.exists
+        fail_msg: "SNI list {{ bridge_list }} not found on the bridge server"
+
+    - name: Read the current SNI list
+      ansible.builtin.slurp:
+        src: "{{ bridge_list }}"
+      register: bridge_raw
+      changed_when: false
+
+    - name: Find an existing route for this SNI
+      ansible.builtin.set_fact:
+        bridge_route: "{{ (bridge_raw.content | b64decode).splitlines()
+          | select('search', '^' ~ (bridge_sni | regex_escape) ~ '\\s') | list | first | default('') }}"
+      changed_when: false
+
+    - name: Refuse a route that already points to another backend
+      ansible.builtin.assert:
+        that:
+          - bridge_state == 'absent' or bridge_route == '' or (bridge_route.split() | length == 2 and bridge_route.split() == [bridge_sni, bridge_backend])
+        fail_msg: "SNI {{ bridge_sni }} already routes elsewhere: {{ bridge_route }}"
+      when: bridge_state == 'present'
+
+    - name: Add the bridge route to the SNI list
+      ansible.builtin.lineinfile:
+        path: "{{ bridge_list }}"
+        line: "{{ bridge_sni }} {{ bridge_backend }}"
+        regexp: "^{{ bridge_sni | regex_escape }}\\s"
+        state: present
+      when: bridge_state == 'present'
+      register: bridge_present
+
+    - name: Remove the bridge route from the SNI list
+      ansible.builtin.lineinfile:
+        path: "{{ bridge_list }}"
+        regexp: "^{{ bridge_sni | regex_escape }}\\s"
+        state: absent
+      when: bridge_state == 'absent'
+      register: bridge_absent
+
+    - name: Regenerate the haproxy configuration
+      ansible.builtin.command:
+        argv: [python3, gen.py]
+        chdir: "{{ bridge_directory }}"
+      when: bridge_present is changed or bridge_absent is changed
+
+    - name: Restart the haproxy container
+      ansible.builtin.command:
+        argv: [docker, compose, restart]
+        chdir: "{{ bridge_directory }}"
+      when: bridge_present is changed or bridge_absent is changed
+
+    - name: Verify the haproxy container is running
+      ansible.builtin.command:
+        argv: [docker, compose, ps, --status, running, -q]
+        chdir: "{{ bridge_directory }}"
+      when: bridge_present is changed or bridge_absent is changed
+      register: bridge_running
+      changed_when: false
+      failed_when: (bridge_running.stdout | trim | length) == 0

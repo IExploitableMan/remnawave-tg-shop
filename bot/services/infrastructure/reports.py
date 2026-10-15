@@ -1,0 +1,127 @@
+"""Local PNG/PDF rendering. No upload service or sponsor content."""
+import statistics
+import textwrap
+from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
+
+FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+MONO = '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf'
+
+
+def fit_text(draw, text, font, width):
+    text = str(text)
+    while text and draw.textlength(text, font=font) > width:
+        text = text[:-2] + '…'
+    return text
+
+
+def summary_pages(directory, manifest, result, index, title_font, label_font):
+    from .report_data import parse_result
+    data = parse_result(result)
+    if not any(data.values()):
+        return []
+    sections = [('services', data['services'][i:i+30]) for i in range(0, len(data['services']), 30)]
+    sections += [('bars', data['bars'][i:i+20]) for i in range(0, len(data['bars']), 20)]
+    if not sections:
+        sections = [('facts', [])]
+    files = []
+    small = ImageFont.truetype(FONT, 18)
+    status_names = {'ok': 'выполнен', 'partial': 'частично', 'failed': 'ошибка', 'timeout': 'таймаут'}
+    for page, (section, rows) in enumerate(sections, 1):
+        facts = ([('Пропущенные проверки', warning) for warning in result.get('warnings', [])] + data['facts'])[:12]
+        facts_height = ((len(facts)+3)//4)*82
+        content_height = ((len(rows)+5)//6)*132 if section == 'services' else ((len(rows)+1)//2)*64
+        height = max(480, 278 + facts_height + content_height)
+        canvas = Image.new('RGB', (1280, height), '#0b0b0b')
+        draw = ImageDraw.Draw(canvas)
+        draw.text((38, 30), manifest['node'], font=title_font, fill='#eeeeee')
+        draw.text((38, 78), f"{manifest['address']} · {manifest['created_at'][:19]} · {index}/{len(manifest['results'])}",
+                  font=label_font, fill='#888888')
+        draw.line((38, 120, 1242, 120), fill='#303030')
+        draw.rounded_rectangle((38, 142, 1242, height-30), radius=8, fill='#121212', outline='#303030')
+        draw.text((62, 164), fit_text(draw, result['title'], label_font, 860), font=label_font, fill='#eeeeee')
+        draw.text((1000, 164), status_names.get(result['status'], result['status']), font=small, fill='#888888')
+        draw.text((62, 195), f"Проход {result['round']} · {result.get('seconds', 0):.0f} сек", font=small, fill='#888888')
+        top = 232
+        for offset, (label, value) in enumerate(facts):
+            x, y = 62+(offset%4)*288, top+(offset//4)*82
+            draw.rounded_rectangle((x,y,x+272,y+68), radius=5, fill='#202020')
+            draw.text((x+12,y+8), fit_text(draw,label,small,248), font=small, fill='#888888')
+            draw.text((x+12,y+35), fit_text(draw,value,label_font,248), font=label_font, fill='#eeeeee')
+        top += facts_height
+        if section == 'services':
+            for offset, row in enumerate(rows):
+                x,y = 62+(offset%6)*192, top+(offset//6)*132
+                fill = '#e5e5e5' if row['status']=='bad' else '#202020'
+                ink = '#191919' if row['status']=='bad' else '#eeeeee'
+                draw.rounded_rectangle((x,y,x+180,y+118), radius=5, fill=fill)
+                name_lines = textwrap.wrap(row['label'], 18)[:2]
+                for number, line in enumerate(name_lines):
+                    draw.text((x+12,y+14+number*23), fit_text(draw,line,small,156), font=small, fill=ink)
+                value = row['value'] or 'N/A'
+                from .flags import draw_value, flag_path, CODE
+                flagged = sum(bool(flag_path(m[1] or m[2])) for m in CODE.finditer(value))
+                draw_value(canvas, draw, (x+12,y+76), fit_text(draw,value,label_font,max(40, 156-29*flagged)), label_font, ink)
+        elif section == 'bars':
+            maximum = max((v for b in data['bars'] for v in (b['value'], b['upload']) if v is not None), default=1) or 1
+            for offset, row in enumerate(rows):
+                x,y = 62+(offset%2)*576, top+(offset//2)*64
+                draw.text((x,y), fit_text(draw,row['label'],small,310), font=small, fill='#eeeeee')
+                down = f"{row['value']:.1f}" if row['value'] is not None else row.get('download_status', 'N/A')
+                up = f"{row['upload']:.1f}" if row['upload'] is not None else row.get('upload_status', 'N/A')
+                value = f'↓ {down}  ↑ {up}'
+                draw.text((x+330,y), value, font=small, fill='#aaaaaa')
+                draw.rectangle((x,y+33,x+550,y+38), fill='#303030')
+                draw.rectangle((x,y+33,x+max(1,int(550*(row['value'] if row['value'] is not None else (row['upload'] or 0))/maximum)),y+38), fill='#dddddd')
+        filename = f'{index:02d}-{page:02d}.png'
+        canvas.save(directory/filename)
+        files.append(filename)
+    return files
+
+
+def aggregate(results):
+    grouped = {}
+    for result in results:
+        for label, value in result.get('metrics', {}).items():
+            grouped.setdefault((result['title'], label), []).append(value)
+    return [{'test': test, 'metric': metric, 'count': len(values), 'min': min(values),
+             'median': statistics.median(values), 'max': max(values)}
+            for (test, metric), values in grouped.items() if len(values) > 1]
+
+
+def render_reports(directory, manifest):
+    if manifest['level'] == 'large':
+        from .terminal_report import render_console_pdf
+        return [render_console_pdf(directory, manifest, aggregate(manifest['results']))]
+    if manifest['level'] == 'small':
+        return []  # The quick report is delivered as formatted Telegram text.
+    title_font = ImageFont.truetype(FONT, 30)
+    label_font = ImageFont.truetype(FONT, 20)
+    mono_font = ImageFont.truetype(MONO, 18)
+    files = []
+    from .terminal_report import report_results
+    for index, result in enumerate(report_results(manifest['results']), 1):
+        summaries = summary_pages(directory, manifest, result, index, title_font, label_font)
+        if summaries:
+            files.extend(summaries)
+            continue
+        lines = [wrapped for line in result['output'].splitlines()
+                 for wrapped in (textwrap.wrap(line, 95, replace_whitespace=False) or [''])]
+        chunks = [lines[offset:offset + 48] for offset in range(0, len(lines), 48)] or [['Нет данных']]
+        for page, chunk in enumerate(chunks, 1):
+            height = max(480, 220 + len(chunk) * 26)
+            image = Image.new('RGB', (1280, height), '#0b0b0b')
+            draw = ImageDraw.Draw(image)
+            draw.text((38, 30), manifest['node'], font=title_font, fill='#f1f1f1')
+            draw.text((38, 78), f"{manifest['address']} · {manifest['created_at'][:19]} · {index}/{len(manifest['results'])}",
+                      font=label_font, fill='#888888')
+            draw.line((38, 120, 1242, 120), fill='#2c2c2c')
+            draw.rounded_rectangle((38, 142, 1242, height - 30), radius=8, fill='#121212', outline='#2c2c2c')
+            draw.text((62, 160), f"{result['title']} · {result['status']} · проход {result['round']}",
+                      font=label_font, fill='#ededed')
+            for line_number, line in enumerate(chunk):
+                draw.text((62, 204 + line_number * 26), line, font=mono_font, fill='#bbbbbb')
+            filename = f'{index:02d}-{page:02d}.png'
+            image.save(directory / filename)
+            files.append(filename)
+    return files

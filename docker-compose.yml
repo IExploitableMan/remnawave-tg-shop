@@ -10,6 +10,7 @@ services:
       - remnawave-network
     volumes:
       - ./locales:/app/locales
+      - ./infra-data:/app/infra-data
     restart: unless-stopped
     depends_on:
       remnawave-tg-shop-db:

@@ -1,0 +1,154 @@
+---
+- name: Prepare and deploy a Remnawave node
+  hosts: node
+  gather_facts: true
+  become: true
+  tasks:
+    - name: Check supported operating system
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution in ['Debian', 'Ubuntu']
+          - (ansible_distribution == 'Debian' and ansible_distribution_major_version in ['12', '13']) or (ansible_distribution == 'Ubuntu' and ansible_distribution_version == '24.04')
+        fail_msg: Unsupported operating system
+
+    - name: Install host dependencies
+      ansible.builtin.apt:
+        name: [ca-certificates, curl, gnupg, ufw, python3]
+        state: present
+        update_cache: true
+
+    - name: Create Docker key directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Install Docker repository key
+      ansible.builtin.get_url:
+        url: "https://download.docker.com/linux/{{ ansible_distribution | lower }}/gpg"
+        dest: /etc/apt/keyrings/docker.asc
+        mode: '0644'
+
+    - name: Configure Docker apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [arch={{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/{{ ansible_distribution | lower }} {{ ansible_distribution_release }} stable"
+        filename: docker
+        state: present
+
+    - name: Install Docker engine and Compose
+      ansible.builtin.apt:
+        name: [docker-ce, docker-ce-cli, containerd.io, docker-compose-plugin]
+        state: present
+        update_cache: true
+
+    - name: Start Docker
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Create root SSH directory
+      ansible.builtin.file:
+        path: /root/.ssh
+        state: directory
+        mode: '0700'
+
+    - name: Install managed public SSH keys without removing other keys
+      ansible.builtin.lineinfile:
+        path: /root/.ssh/authorized_keys
+        line: '{{ item }}'
+        create: true
+        mode: '0600'
+      loop: '{{ ssh_public_keys }}'
+      no_log: true
+
+    - name: Preserve administrator root password access
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/00-remnawave-access.conf
+        content: |
+          PermitRootLogin yes
+          PasswordAuthentication yes
+          PubkeyAuthentication yes
+        mode: '0600'
+      notify: Reload SSH
+
+    - name: Validate SSH configuration
+      ansible.builtin.command: /usr/sbin/sshd -t
+      changed_when: false
+
+    - name: Check BBR availability
+      ansible.builtin.command: modprobe tcp_bbr
+      register: bbr
+      changed_when: false
+      failed_when: false
+
+    - name: Configure BBR and FQ if supported
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/90-remnawave-network.conf
+        content: |
+          net.core.default_qdisc=fq
+          net.ipv4.tcp_congestion_control=bbr
+        mode: '0644'
+      when: bbr.rc == 0
+      register: sysctl_config
+
+    - name: Apply network configuration
+      ansible.builtin.command: sysctl --system
+      when: sysctl_config is changed
+      changed_when: true
+
+    - name: Permit SSH before enabling firewall
+      ansible.builtin.command:
+        argv: [ufw, allow, '{{ ansible_port }}/tcp']
+      changed_when: false
+
+    - name: Permit client connections
+      ansible.builtin.command:
+        argv: [ufw, allow, '443/tcp']
+      changed_when: false
+
+    - name: Permit panel management connection only from configured panel IP
+      ansible.builtin.command:
+        argv: [ufw, allow, from, '{{ panel_ip }}', to, any, port, '2222', proto, tcp]
+      changed_when: false
+
+    - name: Default deny unsolicited incoming connections
+      ansible.builtin.command: ufw default deny incoming
+      changed_when: false
+
+    - name: Enable firewall
+      ansible.builtin.command: ufw --force enable
+      changed_when: false
+
+    - name: Create private node configuration directory
+      ansible.builtin.file:
+        path: /opt/remnanode
+        state: directory
+        mode: '0700'
+
+    - name: Write node Compose configuration
+      ansible.builtin.copy:
+        dest: /opt/remnanode/compose.yml
+        mode: '0600'
+        content: |
+          services:
+            remnanode:
+              image: remnawave/node:{{ node_version }}
+              container_name: remnanode
+              restart: unless-stopped
+              network_mode: host
+              environment:
+                NODE_PORT: '2222'
+                SECRET_KEY: {{ node_secret | to_json }}
+      no_log: true
+
+    - name: Deploy node
+      ansible.builtin.command: docker compose -f /opt/remnanode/compose.yml up -d
+      no_log: true
+      changed_when: true
+
+  handlers:
+    - name: Reload SSH
+      ansible.builtin.service:
+        name: ssh
+        state: reloaded

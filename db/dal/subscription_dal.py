@@ -154,6 +154,15 @@ async def upsert_subscription(
     session: AsyncSession,
     sub_payload: Dict[str, Any],
 ) -> Subscription:
+    sub_payload = dict(sub_payload)
+    if sub_payload.get("user_id") is not None:
+        from db.models import User
+        owner = await session.get(User, sub_payload["user_id"])
+        if owner:
+            sub_payload["panel_user_id"] = (
+                owner.addon_panel_user_id if sub_payload.get("kind") == "addon"
+                else owner.panel_user_id
+            )
     panel_sub_uuid = sub_payload.get("panel_subscription_uuid")
     if not panel_sub_uuid:
         raise ValueError("panel_subscription_uuid is required for upsert.")

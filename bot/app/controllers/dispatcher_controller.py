@@ -5,7 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 from sqlalchemy.orm import sessionmaker
 
 from config.settings import Settings
@@ -28,7 +28,7 @@ def build_dispatcher(settings: Settings, async_session_factory: sessionmaker) ->
 
     bot = Bot(token=settings.BOT_TOKEN, default=default_props, session=session)
 
-    dp = Dispatcher(storage=storage, settings=settings, bot_instance=bot)
+    dp = Dispatcher(storage=storage, events_isolation=SimpleEventIsolation(), settings=settings, bot_instance=bot)
 
     i18n_instance = get_i18n_instance(path="locales", default=settings.DEFAULT_LANGUAGE)
 

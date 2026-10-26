@@ -15,6 +15,7 @@ from db.models import (InfrastructureNode as Node, InfrastructureDeployment as D
 from db.dal import app_settings_dal
 from bot.services.panel_infrastructure_api import PanelInfrastructureApi
 from .settings import read_config, choose_sni, validate_address, next_node_number
+from .errors import require_provider
 
 
 def utcnow():
@@ -173,9 +174,7 @@ class InfrastructureService:
         if replace_id:
             current_node = await self.node(session, replace_id)
             await self.refresh_node(session, current_node)
-        selected_provider = current_node.provider_uuid if replace_id else values['provider_uuid']
-        if not any(p['uuid'] == selected_provider for p in await self.api.providers()):
-            raise ValueError('Провайдер ноды отсутствует в Infra Billing')
+        selected_provider = (await require_provider(self.api, values.get('provider_uuid')))['uuid']
         all_panel = await self.api.nodes()
         if replace_id:
             node = await self.node(session, replace_id)
@@ -192,7 +191,7 @@ class InfrastructureService:
             names = [n['name'] for n in all_panel] + [n.name for n in await self.nodes(session)]
             number = next_node_number(names)
             node = Node(panel_scope=self.scope, name=f"node{number} ({values['country']})",
-                        country=values['country'], provider_uuid=values['provider_uuid'],
+                        country=values['country'], provider_uuid=selected_provider,
                         period_days=int(values['period_days']))
             session.add(node)
             await session.flush()
@@ -211,6 +210,7 @@ class InfrastructureService:
         session.add(deployment)
         await session.flush()
         job = await self.enqueue(session, node, deployment, 'provision', admin_id)
+        job.payload = json.dumps({'provider_uuid': selected_provider})
         return node, job
 
     async def adopt(self, session, panel_uuid):
@@ -238,7 +238,7 @@ class InfrastructureService:
                 node.provider_uuid = entry['providerUuid']
         return node
 
-    async def refresh_node(self, session, node):
+    async def refresh_node(self, session, node, include_billing=True):
         """Read mutable panel metadata without silently moving stored SSH access."""
         if not node.panel_uuid:
             return
@@ -256,9 +256,9 @@ class InfrastructureService:
         if not host:
             host = candidates[0] if len(candidates) == 1 else None
         node.host_uuid = host['uuid'] if host else None
-        entry = await self.billing_entry(session, node)
+        entry = await self.billing_entry(session, node) if include_billing else None
         deployment = await self.deployment(session, node.id)
-        if deployment:
+        if deployment and include_billing:
             deployment.paid_until = (datetime.fromisoformat(entry['nextBillingAt'].replace('Z', '+00:00'))
                 if entry and entry.get('nextBillingAt') else None)
         if deployment and host:
@@ -291,7 +291,7 @@ class InfrastructureService:
         if (await session.execute(select(Job.id).where(Job.node_id == node.id,
                 Job.status.in_(['pending', 'running'])))).first():
             raise ValueError('Дождитесь завершения заданий перед изменением SSH-доступа')
-        current = await self.refresh_node(session, node)
+        current = await self.refresh_node(session, node, include_billing=False)
         if not current:
             raise ValueError('Нода панели не найдена')
         public, fingerprint = await host_key(address, port)
@@ -305,7 +305,6 @@ class InfrastructureService:
         inbound = inbounds[0] if len(inbounds) == 1 else None
         if isinstance(inbound, dict):
             inbound = inbound['uuid']
-        entry = await self.billing_entry(session, node)
         new_identity = (not previous or previous.address != address or previous.host_public_key != public
             or (previous.panel_address and previous.panel_address != current['address']))
         if new_identity:
@@ -315,7 +314,7 @@ class InfrastructureService:
                 host_address=previous.host_address if previous else current['address'],
                 profile_uuid=cp.get('activeConfigProfileUuid'), inbound_uuid=inbound,
                 node_version=(current.get('versions') or {}).get('node') or 'unknown',
-                paid_until=datetime.fromisoformat(entry['nextBillingAt'].replace('Z', '+00:00')) if entry else None)
+                paid_until=previous.paid_until if previous and previous.panel_address == current['address'] else None)
             session.add(deployment)
         else:
             deployment = previous
@@ -351,7 +350,7 @@ class InfrastructureService:
         if entry:
             node.billing_uuid = entry['uuid']
             provider = entry.get('providerUuid') or (entry.get('provider') or {}).get('uuid')
-            if provider:
+            if provider and not node.provider_uuid:
                 node.provider_uuid = provider
         else:
             node.billing_uuid = None
@@ -375,7 +374,8 @@ class InfrastructureService:
         if amount is not None:
             if amount < 0:
                 raise ValueError('Стоимость не может быть отрицательной')
-            await self.api.call('POST', '/infra-billing/history', {'providerUuid': node.provider_uuid,
+            provider = entry.get('providerUuid') or (entry.get('provider') or {}).get('uuid') or node.provider_uuid
+            await self.api.call('POST', '/infra-billing/history', {'providerUuid': provider,
                 'amount': amount, 'billedAt': utcnow().isoformat()})
         await self.restore_host_access(session, node)
         return deadline

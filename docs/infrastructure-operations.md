@@ -29,12 +29,18 @@ Server acceptance checks are required before production use.
 When enabled, **Admin → Settings → Infrastructure → Settings** selects the existing profile,
 VLESS inbound on port 443, panel server IP and tg squad. The panel IP must be its
 actual outbound address toward nodes, not necessarily its reverse-proxy address.
-Debian 12/13 and Ubuntu 24.04 are supported. Root SSH password access is retained.
+Debian and Ubuntu hosts require apt, systemd and amd64/arm64. Releases are not
+enumerated in an allowlist. Provisioning checks that Docker publishes packages
+for the detected release/architecture before changing SSH or firewall settings.
+The automation dependency is Ansible Core 2.21 (including target Python 3.14
+support); rebuild the bot image when installing this update. Root SSH password
+access is retained.
 Adding a public administrator key queues durable propagation to managed servers,
 including servers currently busy with another job; existing
 panel nodes first need their SSH credentials attached. Other authorized keys are
 preserved.
-Attaching SSH credentials does not require an Infra Billing record. An unknown
+Attaching SSH credentials does not query Infra Billing or the provider catalog;
+a billing API outage does not prevent the SSH verification/save operation. An unknown
 paid-until date remains unknown; a later panel billing link is discovered from
 the panel node UUID. Migration `0013_infra_unknown_deadline` permits that state.
 
@@ -55,6 +61,17 @@ and host addresses are switched together with compensation on failed checks.
 After successful switching, the active deployment and its credentials are persisted
 before billing operations. Previous deployments and report history are retained.
 No VPS deletion or server wiping is performed.
+
+Both new installation and replacement require an explicit provider selection.
+The confirmation shows the provider name; it is checked again before enqueue and
+execution. If a selected provider disappears before confirmation/enqueue, the
+wizard returns to selection and keeps the entered values. Unavailable or malformed
+provider responses are errors, not an empty catalog.
+The selected provider is stored in the job payload, independently of the active
+VPS. After a successful VPS switch, billing creates/confirms the new provider
+assignment before removing the exact previous assignment. Expenses remain attached
+to their original provider. A failed cleanup can be retried without creating a
+second new assignment; failed creation leaves the previous assignment intact.
 
 Provider records and billing deadlines are authoritative in panel Infra Billing.
 The per-node duration suggests an extension amount. Renewal extends from the later
@@ -299,3 +316,19 @@ both registered companions together; unrelated hosts sharing an inbound are stil
 rejected. Bridge creation on a Gemini node uses a wildcard Gemini sibling in the
 same profile and preserves REALITY client parameters. Full combined validation
 and deployment are deferred; see the fixes plan before merging PR #3.
+
+## Infrastructure error diagnostics
+
+Handled infrastructure input, callback and job failures write an `Infrastructure
+failure` line to the bot's normal application logger (Docker stdout/stderr):
+
+```bash
+docker compose logs --since 20m --timestamps remnawave-tg-shop > /tmp/bot-debug.log 2>&1
+```
+
+Each line includes action, form flow/phase where available, local node ID,
+exception type, source file/line/function trace and code revision fingerprint.
+It excludes input text, exception messages and traceback locals because these
+can contain credentials. `BOT_BUILD_REVISION` may contain a Git hash; otherwise
+an infrastructure-source fingerprint is computed. Ansible raw output remains
+unsaved; its failure identifies the failed task without dumping private inventory.

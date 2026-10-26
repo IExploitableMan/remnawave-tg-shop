@@ -78,6 +78,63 @@ class InfrastructureHandlerTests(unittest.IsolatedAsyncioTestCase):
         await self.click('infra:gemini_enable:8:chosen-host')
         self.assertEqual((await self.state.get_data())['gemini_host_uuid'], 'chosen-host')
 
+    async def test_replacement_profile_goes_to_provider_before_ssh(self):
+        await self.wizard(replace_id=8, provider_uuid='', phase='profile', profile_step=True,
+            profile_uuid='profile', inbound_uuid='inbound')
+        self.service.api.profiles = AsyncMock(return_value=[{'uuid': 'profile', 'name': 'Default'}])
+        self.service.panel = SimpleNamespace(get_inbounds_by_profile_uuid=AsyncMock(return_value=[
+            {'uuid': 'inbound', 'type': 'vless', 'port': 443}]))
+        with patch('bot.handlers.admin.infrastructure.host_key', new=AsyncMock()) as ssh:
+            await self.click('infra:wizard_profile_default')
+        self.assertEqual((await self.state.get_data())['phase'], 'providers')
+        ssh.assert_not_awaited()
+
+    async def test_deleted_provider_returns_to_selection_without_losing_fields(self):
+        original = await self.wizard(provider_uuid='deleted')
+        with patch('bot.handlers.admin.infrastructure.host_key', new=AsyncMock()) as ssh:
+            await self.click('infra:pickprovider:deleted')
+        data = await self.state.get_data()
+        self.assertEqual(data['phase'], 'providers')
+        self.assertEqual(data['password'], original['password'])
+        self.assertEqual(data['address'], original['address'])
+        ssh.assert_not_awaited()
+
+    async def test_provider_deleted_after_confirmation_recovers_install_form(self):
+        from bot.services.infrastructure.errors import ProviderSelectionRequired
+        original = await self.wizard(phase='confirm')
+        await self.state.set_state(InfrastructureStates.confirm)
+        self.service.prepare = AsyncMock(side_effect=ProviderSelectionRequired())
+        await self.click('infra:install')
+        data = await self.state.get_data()
+        self.assertEqual(data['phase'], 'providers')
+        self.assertEqual(data['password'], original['password'])
+        self.session.rollback.assert_awaited_once()
+
+    async def test_starting_plain_ssh_access_clears_unrelated_wizard_flags(self):
+        await self.wizard(resume_gemini=True, gemini_host_uuid='old', replace_id=9)
+        self.service.node = AsyncMock(return_value=SimpleNamespace(id=8, period_days=30))
+        await self.click('infra:access:8')
+        data = await self.state.get_data()
+        self.assertEqual(data['flow'], 'access')
+        self.assertEqual(data['node_id'], 8)
+        self.assertNotIn('resume_gemini', data)
+        self.assertNotIn('replace_id', data)
+
+    async def test_handled_error_logs_context_without_message_password(self):
+        self.service.node = AsyncMock(return_value=SimpleNamespace(id=8, period_days=30))
+        await self.click('infra:access:8')
+        self.service.save_access = AsyncMock()
+        self.message.text = '203.0.113.1\nprivate-port-secret\nroot\nprivate-password-secret'
+        with self.assertLogs(level='ERROR') as logs:
+            await infrastructure_input(self.message, self.state, self.session, self.service, self.settings, self.i18n)
+        output = '\n'.join(logs.output)
+        self.assertIn('flow=access', output)
+        self.assertIn('node=8', output)
+        self.assertIn('revision=code-', output)
+        self.assertIn('infrastructure_input', output)
+        self.assertNotIn('private-port-secret', output)
+        self.assertNotIn('private-password-secret', output)
+
     async def asyncSetUp(self):
         self.storage = MemoryStorage()
         self.state = FSMContext(self.storage, StorageKey(bot_id=1, chat_id=111, user_id=111))
@@ -97,7 +154,7 @@ class InfrastructureHandlerTests(unittest.IsolatedAsyncioTestCase):
         await self.storage.close()
 
     async def wizard(self, **changes):
-        data = {'flow': 'wizard', 'phase': 'providers', 'position': 7,
+        data = {'flow': 'wizard', 'phase': 'providers', 'position': 7, 'provider_uuid': 'provider',
             'steps': ['address', 'ssh_port', 'ssh_user', 'password', 'host_address', 'country', 'days'],
             'address': '203.0.113.1', 'host_address': 'vpn.example.com', 'ssh_port': 22, 'ssh_user': 'root',
             'password': self.service.cipher().encrypt(b'secret').decode(), 'country': 'DE', 'days': 15}
@@ -127,6 +184,7 @@ class InfrastructureHandlerTests(unittest.IsolatedAsyncioTestCase):
         await self.wizard(provider_uuid='old-provider')
         await self.click('infra:addprovider')
         self.assertEqual((await self.state.get_data())['flow'], 'addprovider')
+        self.service.api.providers.return_value.append({'uuid': 'new-provider', 'name': 'New provider'})
         with patch('bot.handlers.admin.infrastructure.host_key', new=AsyncMock(return_value=('public-key', 'fingerprint'))):
             await infrastructure_input(self.message, self.state, self.session, self.service, self.settings, self.i18n)
         data = await self.state.get_data()

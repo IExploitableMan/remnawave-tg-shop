@@ -407,3 +407,41 @@ stopped state. No test listeners remain on 24443/24444/24500/24501. The temporar
 forwarding password and node secret env file were removed. Main bot polling was
 observed after deployment, with no startup error lines and restart count zero.
 The main panel, existing nodes and the previously shared HTTPS tunnel remain up.
+
+
+## Provider/SSH/OS corrections, 2026-10-26 (local only)
+
+Base: origin/main b80e39d, isolated worktree /tmp/infra-provider-fix,
+branch fix/infra-provider-and-os. The older infrastructure checkout and its
+unrelated .gitignore edit were preserved. No remote server or production bot
+was changed.
+
+- Docker Python 3.12 / Ansible Core 2.21.5: all 215 unittest tests passed,
+  including migrations to head and database regressions in a separately created
+  PostgreSQL database. No tests were skipped. The database was dropped afterward.
+- Provider regression cases: replacement explicitly selects the form provider;
+  confirmation/enqueue recover a removed provider without losing the form;
+  deletion while queued fails before VPS provisioning; inactive billing and
+  provider APIs are not queried by standalone SSH save; stale form flags are reset.
+- Recovery cases: billing create failure retains the old record, lost create
+  response is read back, cleanup failure retries without duplicate creation,
+  a reassigned unrelated record is preserved, expense history is untouched.
+- A fresh isolated remnawave/backend:3.4.5 instance verified the real API contract:
+  create provider A/B, node and A billing/expense, switch node to B, run the
+  application billing reconciler, read back exactly one B assignment and unchanged
+  A expense history (including UUID and amount). Disposable panel/Redis containers,
+  socket volume and database were removed. No host ports were published.
+- Actual Ansible CLI capability checks used synthetic local facts for Ubuntu
+  24.04/26.04/26.10 and Debian 12/14; all accepted. Fedora, non-apt, non-systemd
+  and unsupported architecture cases were rejected. This verifies policy only,
+  not native installation on those releases.
+- All four Ansible playbooks passed syntax checking; main_bot import smoke,
+  Python compileall, locale JSON parsing and git diff --check passed.
+  apt_repository emits a non-blocking deprecation warning for removal in
+  Ansible Core 2.25; this update pins Core below 2.22.
+
+Evidence (temporary local files): /tmp/infra-provider-audit/fix-tests.log,
+/tmp/infra-provider-audit/billing-contract.log and the associated runner scripts.
+The production INFO-only log did not identify the four-line SSH error; the added
+sanitized failure traces will allow a later reproduction to be correlated with
+its code version without logging entered credentials.

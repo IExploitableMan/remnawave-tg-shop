@@ -22,8 +22,13 @@ class PanelInfrastructureApi:
         return result
 
     async def providers(self):
-        result = await self.call('GET', '/infra-billing/providers') or {}
-        return result.get('providers', []) if isinstance(result, dict) else result
+        result = await self.call('GET', '/infra-billing/providers')
+        providers = result.get('providers') if isinstance(result, dict) else result
+        if not isinstance(providers, list) or any(not isinstance(p, dict)
+                or not isinstance(p.get('uuid'), str) or not p['uuid']
+                or not isinstance(p.get('name'), str) or not p['name'] for p in providers):
+            raise RuntimeError('Не удалось получить полный список провайдеров Infra Billing')
+        return providers
 
     async def profiles(self):
         result = await self.call('GET', '/config-profiles') or {}

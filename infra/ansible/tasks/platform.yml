@@ -1,0 +1,12 @@
+---
+- name: Check required host capabilities ({{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }})
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution in ['Debian', 'Ubuntu']
+      - ansible_facts.pkg_mgr == 'apt'
+      - ansible_facts.service_mgr == 'systemd'
+      - ansible_facts.architecture in ['x86_64', 'aarch64']
+    fail_msg: >-
+      Requires Debian/Ubuntu with apt, systemd and amd64/arm64.
+      Detected {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }},
+      {{ ansible_facts.pkg_mgr }}, {{ ansible_facts.service_mgr }}, {{ ansible_facts.architecture }}.

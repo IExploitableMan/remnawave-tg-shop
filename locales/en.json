@@ -1038,5 +1038,9 @@
   "infra_bridge_incompatible": "The wildcard inbound changes REALITY connection parameters; align the key, shortIds, transport and port before creating a bridge",
   "infra_bridge_direct_ambiguous": "Cannot select a unique direct host for this node",
   "infra_bridge_host_mismatch": "The existing bridge host uses a different inbound; synchronize it in the panel",
-  "infra_bridge_same_port": "Another active inbound already uses bridge port 443"
+  "infra_bridge_same_port": "Another active inbound already uses bridge port 443",
+  "infra_provider_reselect": "The provider is missing or no longer available. Choose a provider; your form data have been retained.",
+  "infra_selected_provider": "\nProvider: <b>{p0}</b>",
+  "infra_providers_unavailable": "Could not fetch the complete Infra Billing provider list",
+  "infra_billing_cleanup_failed": "The new provider was saved, but the old billing assignment could not be removed. Retry the operation."
 }

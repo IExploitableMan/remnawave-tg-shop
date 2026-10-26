@@ -205,6 +205,7 @@ async def provision(service, node, deployment, config, job_id):
     # Once traffic has switched, persist the matching credentials immediately.
     # Billing API failure must not leave the card pointing at the old VPS.
     async with service.factory() as session:
+        (await session.get(Node, node.id)).provider_uuid = node.provider_uuid
         previous = (await session.execute(select(Deployment).where(Deployment.node_id == node.id,
             Deployment.state == 'active', Deployment.id != deployment.id))).scalars().all()
         for item in previous:
@@ -215,21 +216,8 @@ async def provision(service, node, deployment, config, job_id):
         await api.call('PATCH', '/hosts', {'uuid': node.host_uuid, 'isDisabled': False})
     await service.publish_snapshots()
     await stage(service, job_id, 'billing')
-    billing = await api.billing()
-    entry = next((b for b in billing.get('billingNodes', []) if
-                 b.get('nodeUuid') == node.panel_uuid or (b.get('node') or {}).get('uuid') == node.panel_uuid), None)
-    if entry:
-        node.billing_uuid = entry['uuid']
-        await api.call('PATCH', '/infra-billing/nodes', {'uuids': [entry['uuid']], 'nextBillingAt': deployment.paid_until.isoformat()})
-    else:
-        await api.call('POST', '/infra-billing/nodes', {'providerUuid': node.provider_uuid,
-            'nodeUuid': node.panel_uuid, 'name': node.name, 'nextBillingAt': deployment.paid_until.isoformat()})
-        billing = await api.billing()
-        entry = next((b for b in billing.get('billingNodes', []) if
-                     b.get('nodeUuid') == node.panel_uuid or (b.get('node') or {}).get('uuid') == node.panel_uuid), None)
-        if not entry:
-            raise RuntimeError('Не найдена созданная запись Infra Billing')
-        node.billing_uuid = entry['uuid']
+    from .billing import reconcile_billing
+    await reconcile_billing(service, node, deployment, job_id)
     async with service.factory() as session:
         row = await session.get(Node, node.id)
         row.billing_uuid = node.billing_uuid
@@ -260,6 +248,10 @@ async def run_job(service, job_id):
                 await changed.commit()
                 node, deployment = live_node, live_deployment
         if job.kind == 'provision':
+            from .errors import require_provider
+            payload = json.loads(job.payload) if job.payload else {}
+            selected = payload.get('provider_uuid') or node.provider_uuid
+            node.provider_uuid = (await require_provider(service.api, selected))['uuid']
             await provision(service, node, deployment, config, job_id)
         elif job.kind == 'keys':
             await stage(service, job_id, 'ssh_keys')
@@ -307,6 +299,8 @@ async def run_job(service, job_id):
     except asyncio.CancelledError:
         raise
     except Exception as exc:
+        from .errors import log_failure
+        log_failure(job.kind, {'flow': 'job', 'node_id': node.id}, exc)
         # Shell/SSH exceptions can echo secrets; only our own safe errors appear.
         status = 'failed'
         result = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else type(exc).__name__

@@ -194,7 +194,7 @@ class InfrastructureTests(unittest.IsolatedAsyncioTestCase):
             {'uuid': 'current', 'node': {'uuid': 'node'}, 'provider': {'uuid': 'provider'}}]})
         self.assertEqual(entry['uuid'], 'current')
         self.assertEqual(node.billing_uuid, 'current')
-        self.assertEqual(node.provider_uuid, 'provider')
+        self.assertEqual(node.provider_uuid, 'old-provider')
 
 
     def test_report_parser_preserves_network_directions_and_normalizes_units(self):
@@ -265,6 +265,13 @@ class InfrastructureTests(unittest.IsolatedAsyncioTestCase):
         deployments = [SimpleNamespace(sni='a.example') for _ in range(3)]
         self.assertEqual(choose_sni(['a.example', 'b.example'], deployments), 'b.example')
         self.assertIsNone(choose_sni([], deployments))
+
+    async def test_invalid_provider_response_is_not_an_empty_catalog(self):
+        panel = SimpleNamespace(_request=AsyncMock(return_value={'response': {'unexpected': []}}))
+        with self.assertRaisesRegex(RuntimeError, 'список провайдеров'):
+            await PanelInfrastructureApi(panel).providers()
+        panel._request.return_value = {'response': {'providers': []}}
+        self.assertEqual(await PanelInfrastructureApi(panel).providers(), [])
 
     def test_address_rejects_shell_payload(self):
         for value in ['example.com; touch /tmp/pwn', '$(id)', '-option', 'a/b']:

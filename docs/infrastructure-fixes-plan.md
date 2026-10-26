@@ -190,3 +190,17 @@ Existing stack: PR #2 (infrastructure -> main), PR #3 (bridges -> infrastructure
 The bridge preparation is kept in the bridge branch; it has not been deployed to
 the server. The earlier 177-test/REALITY evidence applies to the infrastructure
 branch, not these subsequent bridge integration changes.
+
+## Provider selection, SSH independence and OS capability checks, 2026-10-26
+
+- [x] Require and display the selected provider for both new installation and VPS replacement; preserve form data when the provider was deleted.
+- [x] Keep the confirmed provider in the durable job payload; validate it before remote installation, leaving the active VPS provider unchanged until switching succeeds.
+- [x] Reconcile billing by creating/confirming the new provider assignment before removing the exact previous assignment. Preserve original provider expenses and support retry after a lost response or cleanup failure.
+- [x] Save standalone four-line SSH access without reading billing or providers; clear stale wizard/Gemini state when starting an unrelated form.
+- [x] Log handled failures with sanitized action/phase/node/type/source trace and a code fingerprint, without passwords or input contents.
+- [x] Replace exact Debian/Ubuntu release restrictions with apt/systemd/architecture checks. Preflight Docker repository availability and upgrade Ansible Core for Python 3.14 targets.
+- [x] Verify regression cases in Docker/PostgreSQL and provider reassociation against an isolated real panel 3.4.5 API.
+
+The supplied production log contains handled-update INFO entries but no failure
+trace. It does not establish the original standalone SSH failure's root cause.
+Production deployment and a native Ubuntu 26 VPS installation were not performed.

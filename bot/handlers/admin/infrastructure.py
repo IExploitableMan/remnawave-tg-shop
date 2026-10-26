@@ -22,6 +22,7 @@ from bot.services.infrastructure.settings import read_config, save_config, valid
 from bot.services.infrastructure.provisioning import host_key
 from bot.services.infrastructure.diagnostics import send_artifacts
 from bot.services.infrastructure.localization import bind_language, tr, localize_error
+from bot.services.infrastructure.errors import ProviderSelectionRequired, require_provider, log_failure
 from bot.services.infrastructure.job_messages import operation_label, operation_text, operation_buttons, publish_job, status_label
 from bot.services.infrastructure.versions import latest_node_version, version_tuple
 
@@ -172,8 +173,6 @@ async def advance(message, state, service, session, value):
         data = await state.get_data()
         if data.get('profile_step'):
             await choose_wizard_profile(message, state, service, session)
-        elif data.get('replace_id'):
-            await confirmation(message, state, service)
         else:
             await choose_provider(message, state, service)
 
@@ -195,24 +194,28 @@ async def choose_wizard_profile(message, state, service, session):
 
 
 async def finish_wizard_profile(message, state, service):
-    data = await state.get_data()
-    if data.get('replace_id'):
-        await confirmation(message, state, service)
-    else:
-        await choose_provider(message, state, service)
+    await choose_provider(message, state, service)
 
 
 async def choose_provider(message, state, service):
     await state.set_state(InfrastructureStates.input)
     await state.update_data(phase='providers')
+    data = await state.get_data()
     providers = await service.api.providers()
     await message.answer(tr('infra_choose_provider'), reply_markup=keyboard(
-        [(p['name'], f"infra:pickprovider:{p['uuid']}") for p in providers] +
+        [(('✅ ' if p['uuid'] == data.get('provider_uuid') else '') + p['name'], f"infra:pickprovider:{p['uuid']}") for p in providers] +
         [(tr('infra_add_provider'), 'infra:addprovider'), (tr('infra_cancel'), 'infra:home')] + back('infra:wizard_back')))
 
 
 async def confirmation(message, state, service):
     data = await state.get_data()
+    try:
+        provider = await require_provider(service.api, data.get('provider_uuid'))
+    except ProviderSelectionRequired:
+        await state.update_data(host_public_key=None)
+        await message.answer(tr('infra_provider_reselect'))
+        await choose_provider(message, state, service)
+        return
     await message.answer(tr('infra_checking_ssh'),
         reply_markup=keyboard(back('infra:wizard_back')))
     # A timeout is a recoverable form error, not a lost update. The callback
@@ -220,11 +223,14 @@ async def confirmation(message, state, service):
     public, fingerprint = await host_key(data['address'], int(data['ssh_port']))
     current = await state.get_data()
     if current.get('flow') != 'wizard' or any(current.get(k) != data.get(k)
-            for k in ('position', 'address', 'ssh_port', 'provider_uuid')):
+            for k in ('phase', 'position', 'address', 'ssh_port', 'ssh_user', 'password',
+                      'host_address', 'country', 'days', 'provider_uuid', 'profile_uuid', 'inbound_uuid')):
         return  # A Back/edit or newer selection must win over this SSH response.
     await state.update_data(host_public_key=public, phase='confirm')
     await state.set_state(InfrastructureStates.confirm)
-    await message.answer(tr('infra_confirm_install', p0=html.escape(data['address']), p1=html.escape(data['host_address']), p2=data['country'], p3=data['days'], p4=html.escape(fingerprint)) + (tr('infra_selected_profile', p0=html.escape(data['profile_name'])) if data.get('profile_name') else ''),
+    await message.answer(tr('infra_confirm_install', p0=html.escape(data['address']), p1=html.escape(data['host_address']), p2=data['country'], p3=data['days'], p4=html.escape(fingerprint))
+        + tr('infra_selected_provider', p0=html.escape(provider['name']))
+        + (tr('infra_selected_profile', p0=html.escape(data['profile_name'])) if data.get('profile_name') else ''),
         reply_markup=keyboard([(tr('infra_install'), 'infra:install'), (tr('infra_cancel'), 'infra:home')] + back('infra:wizard_back')))
 
 
@@ -239,10 +245,7 @@ async def wizard_back(message, state, service, session, provider_form=False):
         return
     if data.get('flow') != 'wizard':
         raise ValueError(tr('infra_form_closed'))
-    if data.get('phase') == 'confirm' and data.get('replace_id') and data.get('profile_step'):
-        await choose_wizard_profile(message, state, service, session)
-        return
-    if data.get('phase') == 'confirm' and not data.get('replace_id'):
+    if data.get('phase') == 'confirm':
         await choose_provider(message, state, service)
         return
     if data.get('profile_step') and data.get('phase') == 'providers':
@@ -418,8 +421,6 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             data = await state.get_data()
             if data.get('flow') != 'wizard' or data['position'] != len(data['steps']):
                 raise ValueError(tr('infra_form_closed'))
-            if not any(p['uuid'] == argument for p in await service.api.providers()):
-                raise ValueError(tr('infra_provider_not_found'))
             await state.update_data(provider_uuid=argument, phase='providers')
             await confirmation(callback.message, state, service)
         elif action == 'install':
@@ -429,7 +430,14 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             if data.get('flow') != 'wizard':
                 raise ValueError(tr('infra_form_closed'))
             values = dict(data, period_days=data['days'], password=service.cipher().decrypt(data['password'].encode()).decode())
-            node, job = await service.prepare(session, values, callback.from_user.id, data.get('replace_id'))
+            try:
+                node, job = await service.prepare(session, values, callback.from_user.id, data.get('replace_id'))
+            except ProviderSelectionRequired:
+                await session.rollback()
+                await state.update_data(host_public_key=None)
+                await callback.message.answer(tr('infra_provider_reselect'))
+                await choose_provider(callback.message, state, service)
+                return
             await session.commit()
             await state.clear()
             BACK_TARGET.set('infra:nodes')
@@ -582,7 +590,7 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             node = await service.node(session, argument)
             if action == 'bridge_create' and not await service.deployment(session, node.id):
                 raise ValueError(tr('infra_attach_access_first'))
-            await state.update_data(flow=action, node_id=node.id)
+            await state.set_data({'flow': action, 'node_id': node.id, 'return_to': f'infra:node:{node.id}'})
             await state.set_state(InfrastructureStates.input)
             prompt = {'extend': tr('infra_ask_extension', p0=node.period_days),
                 'access': tr('infra_ask_ssh_only'),
@@ -671,7 +679,8 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             if not deployment:
                 if action == 'gemini_enable':
                     BACK_TARGET.set(f'infra:node:{node.id}')
-                    await state.update_data(flow='access', node_id=node.id, resume_gemini=True, gemini_host_uuid=host_uuid)
+                    await state.set_data({'flow': 'access', 'node_id': node.id, 'resume_gemini': True,
+                        'gemini_host_uuid': host_uuid, 'return_to': f'infra:node:{node.id}'})
                     await state.set_state(InfrastructureStates.input)
                     await callback.message.answer(tr('infra_ask_ssh_only'), reply_markup=keyboard(back()))
                     return
@@ -821,6 +830,7 @@ async def infrastructure_callback(callback: types.CallbackQuery, state: FSMConte
             await show(callback, tr('infra_deleted'), back())
     except (ValueError, RuntimeError, OSError, TimeoutError, asyncssh.Error) as exc:
         await session.rollback()
+        log_failure(action, await state.get_data(), exc)
         safe = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else tr('infra_ssh_timeout')
         await callback.message.answer(html.escape(localize_error(safe)), reply_markup=keyboard(back()))
 
@@ -1002,5 +1012,6 @@ async def infrastructure_input(message: types.Message, state: FSMContext, sessio
         await message.answer(tr('infra_saved'), reply_markup=keyboard(back()))
     except (ValueError, RuntimeError, OSError, TimeoutError, asyncssh.Error) as exc:
         await session.rollback()
+        log_failure('input', data, exc)
         safe = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else tr('infra_ssh_error')
         await message.answer(html.escape(localize_error(safe)), reply_markup=keyboard(back()))

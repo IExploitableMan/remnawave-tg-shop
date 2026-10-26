@@ -4,12 +4,8 @@
   gather_facts: true
   become: true
   tasks:
-    - name: Check supported operating system
-      ansible.builtin.assert:
-        that:
-          - ansible_distribution in ['Debian', 'Ubuntu']
-          - (ansible_distribution == 'Debian' and ansible_distribution_major_version in ['12', '13']) or (ansible_distribution == 'Ubuntu' and ansible_distribution_version == '24.04')
-        fail_msg: Unsupported operating system
+    - name: Check host platform
+      ansible.builtin.import_tasks: tasks/platform.yml
 
     - name: Install curl for the pinned Psiphon installer
       ansible.builtin.apt:

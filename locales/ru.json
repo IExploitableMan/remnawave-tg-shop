@@ -1039,5 +1039,9 @@
   "infra_bridge_incompatible": "Wildcard inbound меняет параметры подключения REALITY; согласуйте ключ, shortIds, transport и порт перед созданием моста",
   "infra_bridge_direct_ambiguous": "Не удалось однозначно выбрать прямой host ноды для моста",
   "infra_bridge_host_mismatch": "Существующий host моста использует другой inbound; синхронизируйте его в панели",
-  "infra_bridge_same_port": "Другой активный inbound уже использует порт моста 443"
+  "infra_bridge_same_port": "Другой активный inbound уже использует порт моста 443",
+  "infra_provider_reselect": "Провайдер не выбран или больше недоступен. Выберите провайдера; введённые данные сохранены.",
+  "infra_selected_provider": "\nПровайдер: <b>{p0}</b>",
+  "infra_providers_unavailable": "Не удалось получить полный список провайдеров Infra Billing",
+  "infra_billing_cleanup_failed": "Новый провайдер сохранён, но старую привязку биллинга удалить не удалось. Повторите задание."
 }

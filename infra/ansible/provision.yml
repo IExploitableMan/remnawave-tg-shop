@@ -4,18 +4,36 @@
   gather_facts: true
   become: true
   tasks:
-    - name: Check supported operating system
-      ansible.builtin.assert:
-        that:
-          - ansible_distribution in ['Debian', 'Ubuntu']
-          - (ansible_distribution == 'Debian' and ansible_distribution_major_version in ['12', '13']) or (ansible_distribution == 'Ubuntu' and ansible_distribution_version == '24.04')
-        fail_msg: Unsupported operating system
+    - name: Check host platform
+      ansible.builtin.import_tasks: tasks/platform.yml
 
     - name: Install host dependencies
       ansible.builtin.apt:
         name: [ca-certificates, curl, gnupg, ufw, python3]
         state: present
         update_cache: true
+
+    - name: Check Docker repository codename
+      ansible.builtin.assert:
+        that: ansible_facts.distribution_release is match('^[a-z0-9_-]+$')
+        fail_msg: Cannot determine the Docker repository codename for this host
+
+    - name: Look up Docker packages for this release and architecture
+      ansible.builtin.uri:
+        url: "https://download.docker.com/linux/{{ ansible_facts.distribution | lower }}/dists/{{ ansible_facts.distribution_release }}/stable/binary-{{ 'arm64' if ansible_facts.architecture == 'aarch64' else 'amd64' }}/Packages.gz"
+        method: HEAD
+        timeout: 30
+      register: docker_repository
+      changed_when: false
+      failed_when: false
+
+    - name: Check Docker packages ({{ ansible_facts.distribution_release }}, {{ ansible_facts.architecture }})
+      ansible.builtin.assert:
+        that: docker_repository.status | default(-1) == 200
+        fail_msg: >-
+          Docker repository packages are unavailable for {{ ansible_facts.distribution }}
+          {{ ansible_facts.distribution_version }} ({{ ansible_facts.distribution_release }}),
+          {{ ansible_facts.architecture }}. SSH and firewall configuration has not been changed.
 
     - name: Create Docker key directory
       ansible.builtin.file:
@@ -25,13 +43,13 @@
 
     - name: Install Docker repository key
       ansible.builtin.get_url:
-        url: "https://download.docker.com/linux/{{ ansible_distribution | lower }}/gpg"
+        url: "https://download.docker.com/linux/{{ ansible_facts.distribution | lower }}/gpg"
         dest: /etc/apt/keyrings/docker.asc
         mode: '0644'
 
     - name: Configure Docker apt repository
       ansible.builtin.apt_repository:
-        repo: "deb [arch={{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/{{ ansible_distribution | lower }} {{ ansible_distribution_release }} stable"
+        repo: "deb [arch={{ 'arm64' if ansible_facts.architecture == 'aarch64' else 'amd64' }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/{{ ansible_facts.distribution | lower }} {{ ansible_facts.distribution_release }} stable"
         filename: docker
         state: present
 

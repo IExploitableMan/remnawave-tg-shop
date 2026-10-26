@@ -92,6 +92,85 @@ class InfrastructureDatabaseTests(unittest.IsolatedAsyncioTestCase):
         async with self.factory() as session:
             self.assertEqual(await job_host_uuid(self.service, session, node, job_id), 'selected-host')
 
+    async def test_replacement_keeps_explicit_provider_in_job_without_changing_active_vps(self):
+        from unittest.mock import patch
+        import json
+        node, deployment = await self.node_fixture()
+        old_provider = node.provider_uuid
+        provider, profile, inbound, panel_uuid = [str(uuid4()) for _ in range(4)]
+        async with self.factory() as session:
+            (await session.get(Node, node.id)).panel_uuid = panel_uuid
+            await session.commit()
+        self.service.api.nodes = AsyncMock(return_value=[{'uuid': panel_uuid, 'name': node.name,
+            'address': deployment.address, 'countryCode': 'RU', 'providerUuid': old_provider,
+            'configProfile': {'activeConfigProfileUuid': profile, 'activeInbounds': [inbound]}}])
+        self.service.api.providers = AsyncMock(return_value=[{'uuid': provider, 'name': 'New provider'}])
+        self.service.api.billing = AsyncMock(return_value={'billingNodes': []})
+        self.service.panel.get_all_hosts = AsyncMock(return_value=[])
+        self.service.panel.get_inbounds_by_profile_uuid = AsyncMock(return_value=[{'uuid': inbound, 'type': 'vless', 'port': 443}])
+        defaults = {'profile_uuid': profile, 'inbound_uuid': inbound, 'panel_ip': '203.0.113.10',
+            'sni_ru': [], 'sni_other': [], 'node_version_2': '2.8.0'}
+        values = {'provider_uuid': provider, 'country': 'RU', 'address': '203.0.113.2', 'period_days': 30,
+            'password': 'fixture', 'host_public_key': 'fixture'}
+        async with self.factory() as session:
+            with patch('bot.services.infrastructure.service.read_config', new=AsyncMock(return_value=defaults)):
+                saved, job = await self.service.prepare(session, values, 111, node.id)
+            await session.commit()
+            self.assertEqual(saved.provider_uuid, old_provider)
+            self.assertEqual(saved.panel_uuid, panel_uuid)
+            self.assertEqual(json.loads(job.payload)['provider_uuid'], provider)
+
+    async def test_provider_deleted_while_queued_fails_before_installing_vps(self):
+        from unittest.mock import patch
+        import json
+        from bot.services.infrastructure.provisioning import run_job
+        node, deployment = await self.node_fixture()
+        async with self.factory() as session:
+            job = await self.service.enqueue(session, node, deployment, 'provision', 111)
+            job.payload = json.dumps({'provider_uuid': 'deleted-provider'})
+            await session.commit()
+            job_id = job.id
+        self.service.api.providers = AsyncMock(return_value=[])
+        with patch('bot.services.infrastructure.provisioning.provision', new=AsyncMock()) as install, \
+                patch('bot.services.infrastructure.provisioning.read_config', new=AsyncMock(return_value={})), \
+                patch('bot.services.infrastructure.job_messages.publish_job', new=AsyncMock()):
+            await run_job(self.service, job_id)
+            install.assert_not_awaited()
+        async with self.factory() as session:
+            failed = await session.get(Job, job_id)
+            self.assertEqual(failed.status, 'failed')
+            self.assertIn('Провайдер', failed.result)
+            self.assertEqual((await session.get(Node, node.id)).provider_uuid, node.provider_uuid)
+
+    async def test_save_ssh_does_not_query_billing_or_provider_catalog(self):
+        import asyncssh
+        from unittest.mock import patch, MagicMock
+        node, old = await self.node_fixture()
+        async with self.factory() as session:
+            stored = await session.get(Node, node.id)
+            stored.panel_uuid = str(uuid4())
+            stored.provider_uuid = ''
+            panel_uuid = stored.panel_uuid
+            await session.commit()
+        public = asyncssh.generate_private_key('ssh-ed25519').export_public_key().decode().strip()
+        self.service.api.nodes = AsyncMock(return_value=[{'uuid': panel_uuid, 'name': node.name,
+            'address': old.address, 'countryCode': 'RU', 'providerUuid': None,
+            'configProfile': {'activeConfigProfileUuid': old.profile_uuid, 'activeInbounds': [old.inbound_uuid]}}])
+        self.service.api.billing = AsyncMock(side_effect=RuntimeError('billing unavailable'))
+        self.service.api.providers = AsyncMock(side_effect=RuntimeError('providers unavailable'))
+        self.service.panel.get_all_hosts = AsyncMock(return_value=[])
+        connect = MagicMock()
+        connect.return_value.__aenter__ = AsyncMock()
+        connect.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch('bot.services.infrastructure.provisioning.host_key', new=AsyncMock(return_value=(public, 'fingerprint'))), patch('asyncssh.connect', connect):
+            async with self.factory() as session:
+                saved = await session.get(Node, node.id)
+                access, fingerprint = await self.service.save_access(session, saved, old.address, 22, 'root', 'fixture')
+                await session.commit()
+                self.assertEqual(self.service.cipher().decrypt(access.credentials.encode()).decode(), 'fixture')
+        self.service.api.billing.assert_not_awaited()
+        self.service.api.providers.assert_not_awaited()
+
     async def test_panel_deleted_node_archives_credentials_reports_and_cancels_queue(self):
         node, deployment = await self.node_fixture()
         async with self.factory() as session:

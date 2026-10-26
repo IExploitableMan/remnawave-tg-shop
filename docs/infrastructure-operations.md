@@ -56,6 +56,12 @@ manual retry, not blindly restarted. Multiple pending diagnostics can wait durab
 in FIFO order. One running job per node is enforced by a PostgreSQL partial unique
 index; an advisory lock elects one infrastructure worker.
 
+New client-facing hosts use a country flag and English country name, for example
+`🇫🇮 Finland`, then `🇫🇮 Finland 2`. Existing hosts associated with nodes in the
+same country count even when they have a custom name. Existing host remarks are
+preserved during VPS replacement. An unrecognized country code is shown as the
+code itself. Host names are chosen from the current panel state during provisioning.
+
 Replacement installs the new VPS and retains the existing panel node UUID. Node
 and host addresses are switched together with compensation on failed checks.
 After successful switching, the active deployment and its credentials are persisted

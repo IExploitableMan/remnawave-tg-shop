@@ -176,8 +176,10 @@ async def provision(service, node, deployment, config, job_id):
         if not node.host_uuid:
             values['isDisabled'] = True
         if not node.host_uuid:
-            candidate = next((h for h in hosts if h.get('nodes') == [node.panel_uuid] and h['remark'] == node.name), None)
-            result = candidate or await api.call('POST', '/hosts', dict(values, remark=node.name))
+            from .host_names import country_host_name, existing_created_host
+            candidate = existing_created_host(hosts, node, deployment)
+            remark = country_host_name(node.country, hosts, await api.nodes()) if not candidate else None
+            result = candidate or await api.call('POST', '/hosts', dict(values, remark=remark))
             node.host_uuid = result['uuid']
             async with service.factory() as session:
                 row = await session.get(Node, node.id); row.host_uuid = node.host_uuid

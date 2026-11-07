@@ -10,7 +10,8 @@ DEFAULTS = {
     'node_version_2': '2.8.0', 'node_version_3': '3.4.2',
     'sni_ru': [], 'sni_other': [], 'ssh_keys': [], 'large_repeats': 1,
     'bridge_address': '', 'bridge_ssh_port': 22, 'bridge_ssh_user': 'root',
-    'bridge_host_public_key': '',
+    'bridge_host_public_key': '', 'bridge_extra_routes': [],
+    'bridge_wildcard_backend': '127.0.0.1:8443',
 }
 
 
@@ -35,6 +36,33 @@ def validate_address(value):
         return str(ipaddress.ip_address(value))
     except ValueError:
         return validate_hostname(value)
+
+
+def validate_route(value):
+    """'sni host:port' with an optional bracketed IPv6 host; returns (sni, backend)."""
+    parts = str(value).split()
+    if len(parts) != 2:
+        raise ValueError('Некорректный маршрут: ожидается "sni host:port"')
+    sni = validate_hostname(parts[0])
+    host, separator, port = parts[1].rpartition(':')
+    host = host.strip('[]')
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        raise ValueError('Некорректный маршрут: ожидается "sni host:port"') from None
+    if not separator or not 1 <= port <= 65535 or not host:
+        raise ValueError('Некорректный маршрут: ожидается "sni host:port"')
+    try:
+        host = str(ipaddress.ip_address(host))
+    except ValueError:
+        host = validate_hostname(host)
+    # haproxy requires brackets around an IPv6 backend address.
+    return sni, f'[{host}]:{port}' if ':' in host else f'{host}:{port}'
+
+
+def validate_backend(value):
+    """'host:port' with an optional bracketed IPv6 host; returns 'host:port'."""
+    return validate_route(f'sni.invalid {value}')[1]
 
 
 async def read_config(session):

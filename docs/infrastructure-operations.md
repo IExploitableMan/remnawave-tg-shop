@@ -313,15 +313,48 @@ Final checkpoint-count polish: 56 focused infrastructure tests passed, including
 
 The node card reads the current panel host restrictions and toggles only the configured tg squad. Other squad restrictions, inbound settings and host disabled state remain unchanged. Multiple linked hosts require explicit selection when there is no recorded primary host. Manual hiding is retained on renewal; renewal restores only restrictions saved by the expiry worker. The Excluded Internal Squads property belongs to hosts in Panel API 2.x, and is represented by internalSquads in API 3.x.
 
-### Pending stacked bridge integration
+### Bridges
 
-The bridges branch is stacked above this infrastructure change. It keeps bridge
-job payload when retrying, preserves unrelated active inbounds, and records the
-direct host and its bridge as companions sharing one listener. Gemini switches
-both registered companions together; unrelated hosts sharing an inbound are still
-rejected. Bridge creation on a Gemini node uses a wildcard Gemini sibling in the
-same profile and preserves REALITY client parameters. Full combined validation
-and deployment are deferred; see the fixes plan before merging PR #3.
+One bridge server runs haproxy on port 443 and hosts the bridge node — the
+infra node deployed at the configured bridge address. haproxy routes by SNI
+and is the only owner of 443; every bridge forwards its SNI to the bridged
+node's address, and subscribers ride the bridge through hosts bound to the
+wildcard with an SNI override. Because the subscription carries the
+wildcard's REALITY keypair, the bridged node itself must terminate the
+wildcard: bridging switches the node (and its direct host, plus squad
+memberships) onto the wildcard listener, and removal switches everything
+back. The bridge node never runs the wildcard (haproxy owns its 443; at
+most a local 8443 serves the mask route) and is never switched or restarted
+by the bot.
+
+The bot owns the whole haproxy routing table and the server holds no state:
+extra routes live in the infrastructure settings (bridge_extra_routes),
+every registered bridge contributes one route to the bridged node's
+address:443, and the wildcard's own REALITY mask domain (its target) is
+routed to the local wildcard backend (bridge_wildcard_backend, by default
+127.0.0.1:8443) automatically so the certificate SNI reaches REALITY instead
+of the reject. Unmatched SNIs are rejected. Each apply renders /opt/remnanode/haproxy.cfg from that table —
+one ACL and use_backend per route, one backend per unique backend address,
+and a fail-closed default — then validates it with `haproxy -c` inside the
+compose service image before restarting. The only server-side requirement is
+a compose file in /opt/remnanode with a service named haproxy mounting
+./haproxy.cfg at /usr/local/etc/haproxy/haproxy.cfg and publishing port 443.
+
+Bridging a client node from the dedicated Bridges menu adds the SNI to the
+wildcard serverNames, switches the node and its direct host onto the
+wildcard listener, adds the wildcard to the source inbound's squads, renders
+the routing table with the new route and creates the bridge host. One bridge
+per node; the SNI must be unique across hosts and routes. Removal reverses
+the recorded steps: host, route (re-render without this bridge), direct-host
+binding, node inbounds, squad memberships and — only if the bot added it and
+no other bridge, extra or host uses it — the SNI list entry; removal is
+refused while Gemini is enabled on the pair. Changing the bridge address in
+the settings re-points
+every registered bridge host to the new address. The Wildcard domain action
+re-masks the wildcard inbound onto a new domain after verifying that its
+certificate covers every SNI in the routing table: it writes the domain into
+the REALITY target and serverNames and re-renders haproxy, so the domain is
+routed to the local wildcard backend. The bridge node is not restarted.
 
 ## Infrastructure error diagnostics
 

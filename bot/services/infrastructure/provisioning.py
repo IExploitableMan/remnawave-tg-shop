@@ -84,8 +84,11 @@ async def ansible(service, deployment, config, kind='provision', secret=None):
         await _run_playbook(Path(__file__).resolve().parents[3] / 'infra' / 'ansible' / f'{kind}.yml', path)
 
 
-async def ansible_bridge(service, config, sni, backend, state='present'):
-    """Manage one SNI route on the shared bridge server using the bot SSH key."""
+async def ansible_bridge(service, config, routes):
+    """Render the complete haproxy SNI routing table on the bridge server.
+
+    An empty route list is legitimate: it renders a fail-closed configuration.
+    """
     if not config['bridge_address'] or not config['bridge_host_public_key']:
         raise ValueError('Мост не настроен: укажите адрес моста и проверьте подключение в настройках инфраструктуры')
     if not service.settings.INFRA_SSH_PRIVATE_KEY:
@@ -102,7 +105,7 @@ async def ansible_bridge(service, config, sni, backend, state='present'):
             'ansible_user': config['bridge_ssh_user'],
             'ansible_ssh_private_key_file': service.settings.INFRA_SSH_PRIVATE_KEY,
             'ansible_ssh_common_args': f'-o StrictHostKeyChecking=yes -o UserKnownHostsFile={known_hosts}',
-            'bridge_sni': sni, 'bridge_backend': backend, 'bridge_state': state}}}}
+            'bridge_routes': [dict(route) for route in routes]}}}}
         path = directory / 'inventory.json'
         path.write_text(json.dumps(inventory)); path.chmod(0o600)
         await _run_playbook(Path(__file__).resolve().parents[3] / 'infra' / 'ansible' / 'bridge.yml', path)
@@ -292,6 +295,9 @@ async def run_job(service, job_id):
             from .bridge import create_bridge
             payload = json.loads(job.payload) if job.payload else {}
             await create_bridge(service, node, deployment, config, job_id, payload.get('sni'))
+        elif job.kind == 'bridge_delete':
+            from .bridge import remove_bridge
+            await remove_bridge(service, node, deployment, config, job_id)
         elif job.kind in {'small', 'medium', 'large'}:
             from .diagnostics import run_diagnostics
             await run_diagnostics(service, job, node, deployment, config)

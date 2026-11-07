@@ -16,7 +16,7 @@ from bot.middlewares.i18n import get_i18n_instance
 KINDS = {'provision': 'install', 'keys': 'keys', 'upgrade': 'upgrade', 'restart': 'restart',
          'small': 'small', 'medium': 'medium', 'large': 'large',
          'gemini_enable': 'gemini_enable', 'gemini_disable': 'gemini_disable',
-         'bridge_create': 'bridge_create'}
+         'bridge_create': 'bridge_create', 'bridge_delete': 'bridge_delete'}
 STAGES = {'queued': 'queued', 'ansible': 'install', 'panel_node': 'panel', 'connection_check': 'check',
           'host': 'host', 'billing': 'billing', 'ssh_keys': 'keys', 'verification': 'check',
           'dependencies': 'dependencies', 'complete': 'complete', 'psiphon': 'psiphon',
@@ -67,7 +67,7 @@ def operation_text(job, node, translate, ahead=None):
                 error = translate(key)
                 break
         text += '\n' + html.escape(error)
-    elif job.status == 'done' and job.kind in {'gemini_enable', 'gemini_disable', 'bridge_create'}:
+    elif job.status == 'done' and job.kind in {'gemini_enable', 'gemini_disable', 'bridge_create', 'bridge_delete'}:
         text += '\n' + translate('infra_result_' + job.kind)
     if job.finished_at and job.started_at:
         duration = max(0, int((job.finished_at - job.started_at).total_seconds()))

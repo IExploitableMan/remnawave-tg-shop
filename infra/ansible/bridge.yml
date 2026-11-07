@@ -1,75 +1,97 @@
 ---
-- name: Manage one SNI bridge route on the shared haproxy fronting server
+- name: Render the haproxy SNI routing table on the shared bridge server
   hosts: node
   gather_facts: false
   become: true
   vars:
     bridge_directory: /opt/remnanode
-    bridge_list: "{{ bridge_directory }}/sni.txt"
+    bridge_config: "{{ bridge_directory }}/haproxy.cfg"
+    # An empty route table is legitimate: the fact below is only defined when
+    # the loop runs at least once, so the default must exist for the template.
+    bridge_backends: []
   tasks:
-    - name: Check the SNI list exists
-      ansible.builtin.stat:
-        path: "{{ bridge_list }}"
-      register: bridge_stat
-
-    - name: Refuse to continue without the SNI list
-      ansible.builtin.assert:
-        that: bridge_stat.stat.exists
-        fail_msg: "SNI list {{ bridge_list }} not found on the bridge server"
-
-    - name: Read the current SNI list
-      ansible.builtin.slurp:
-        src: "{{ bridge_list }}"
-      register: bridge_raw
-      changed_when: false
-
-    - name: Find an existing route for this SNI
+    - name: Collect the unique backends
       ansible.builtin.set_fact:
-        bridge_route: "{{ (bridge_raw.content | b64decode).splitlines()
-          | select('search', '^' ~ (bridge_sni | regex_escape) ~ '\\s') | list | first | default('') }}"
-      changed_when: false
+        bridge_backends: "{{ bridge_backends | default([]) + [item.backend] }}"
+      loop: "{{ bridge_routes }}"
+      when: item.backend not in (bridge_backends | default([]))
 
-    - name: Refuse a route that already points to another backend
+    - name: Render the haproxy configuration
+      ansible.builtin.copy:
+        dest: "{{ bridge_config }}"
+        mode: '0644'
+        content: |
+          global
+              log stdout format raw local0
+              maxconn 50000
+
+          defaults
+              log global
+              mode tcp
+              option dontlognull
+              timeout connect 10s
+              timeout client 300s
+              timeout server 300s
+
+          frontend tls-in
+              bind *:443
+              mode tcp
+              tcp-request inspect-delay 5s
+              tcp-request content accept if { req_ssl_hello_type 1 }
+          {% for route in bridge_routes %}    acl sni_{{ loop.index }} req.ssl_sni -i {{ route.sni }}
+              use_backend {{ route.backend | replace('[', '') | replace(']', '') | replace(':', '_') | replace('.', '_') }} if sni_{{ loop.index }}
+          {% endfor %}    default_backend reject
+
+          {% for backend in bridge_backends %}backend {{ backend | replace('[', '') | replace(']', '') | replace(':', '_') | replace('.', '_') }}
+              mode tcp
+              server target {{ backend }}
+
+          {% endfor %}backend reject
+              mode tcp
+              tcp-request content reject
+      register: bridge_rendered
+
+    - name: Check the compose stack files
+      ansible.builtin.stat:
+        path: "{{ bridge_directory }}/{{ item }}"
+      loop: ['compose.yml', 'compose.yaml', 'docker-compose.yml']
+      register: bridge_compose_files
+
+    - name: Refuse to continue without the compose stack
       ansible.builtin.assert:
-        that:
-          - bridge_state == 'absent' or bridge_route == '' or (bridge_route.split() | length == 2 and bridge_route.split() == [bridge_sni, bridge_backend])
-        fail_msg: "SNI {{ bridge_sni }} already routes elsewhere: {{ bridge_route }}"
-      when: bridge_state == 'present'
+        that: bridge_compose_files.results | selectattr('stat.exists') | list | length > 0
+        fail_msg: >-
+          No compose file in {{ bridge_directory }}. Deploy the haproxy stack first:
+          a service named haproxy with ./haproxy.cfg mounted at
+          /usr/local/etc/haproxy/haproxy.cfg and port 443 published.
+      when: bridge_rendered is changed
 
-    - name: Add the bridge route to the SNI list
-      ansible.builtin.lineinfile:
-        path: "{{ bridge_list }}"
-        line: "{{ bridge_sni }} {{ bridge_backend }}"
-        regexp: "^{{ bridge_sni | regex_escape }}\\s"
-        state: present
-      when: bridge_state == 'present'
-      register: bridge_present
-
-    - name: Remove the bridge route from the SNI list
-      ansible.builtin.lineinfile:
-        path: "{{ bridge_list }}"
-        regexp: "^{{ bridge_sni | regex_escape }}\\s"
-        state: absent
-      when: bridge_state == 'absent'
-      register: bridge_absent
-
-    - name: Regenerate the haproxy configuration
+    - name: Ensure the haproxy stack is up
       ansible.builtin.command:
-        argv: [python3, gen.py]
+        argv: [docker, compose, up, -d]
         chdir: "{{ bridge_directory }}"
-      when: bridge_present is changed or bridge_absent is changed
+      when: bridge_rendered is changed
+      changed_when: true
+
+    - name: Validate the haproxy configuration
+      ansible.builtin.command:
+        argv: [docker, compose, run, --rm, --no-deps, haproxy,
+               haproxy, -c, -f, /usr/local/etc/haproxy/haproxy.cfg]
+        chdir: "{{ bridge_directory }}"
+      when: bridge_rendered is changed
+      changed_when: false
 
     - name: Restart the haproxy container
       ansible.builtin.command:
         argv: [docker, compose, restart]
         chdir: "{{ bridge_directory }}"
-      when: bridge_present is changed or bridge_absent is changed
+      when: bridge_rendered is changed
 
     - name: Verify the haproxy container is running
       ansible.builtin.command:
         argv: [docker, compose, ps, --status, running, -q]
         chdir: "{{ bridge_directory }}"
-      when: bridge_present is changed or bridge_absent is changed
+      when: bridge_rendered is changed
       register: bridge_running
       changed_when: false
       failed_when: (bridge_running.stdout | trim | length) == 0

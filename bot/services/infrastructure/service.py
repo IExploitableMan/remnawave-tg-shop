@@ -111,6 +111,8 @@ class InfrastructureService:
             Job.status.in_(['pending', 'running'])))).scalars().all()
         if kind.startswith('gemini_') and any(item.startswith('gemini_') for item in active):
             raise ValueError('Настройка Gemini для этой ноды уже ожидает выполнения')
+        if kind.startswith('bridge_') and any(item.startswith('bridge_') for item in active):
+            raise ValueError('Операция с мостом для этой ноды уже ожидает выполнения')
         if active and (kind == 'provision' or 'provision' in active):
             raise ValueError('Дождитесь завершения установки ноды перед новым заданием')
         job = Job(node_id=node.id, deployment_id=deployment.id, kind=kind, requested_by=admin_id)

@@ -15,6 +15,13 @@ async def get_settings_map(session: AsyncSession) -> Dict[str, str]:
     return {item.key: item.value for item in result.scalars().all()}
 
 
+async def delete_setting(session: AsyncSession, key: str) -> None:
+    item = await session.get(AppSetting, key)
+    if item:
+        await session.delete(item)
+        await session.flush()
+
+
 async def upsert_setting(
     session: AsyncSession,
     key: str,

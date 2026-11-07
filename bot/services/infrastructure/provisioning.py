@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import asyncssh
 from sqlalchemy import select
 from db.models import InfrastructureNode as Node, InfrastructureDeployment as Deployment, InfrastructureJob as Job
+from bot.services.infrastructure.settings import validate_backend
 from .settings import read_config
 
 
@@ -105,7 +106,8 @@ async def ansible_bridge(service, config, routes):
             'ansible_user': config['bridge_ssh_user'],
             'ansible_ssh_private_key_file': service.settings.INFRA_SSH_PRIVATE_KEY,
             'ansible_ssh_common_args': f'-o StrictHostKeyChecking=yes -o UserKnownHostsFile={known_hosts}',
-            'bridge_routes': [dict(route) for route in routes]}}}}
+            'bridge_routes': [dict(route) for route in routes],
+            'bridge_wildcard_backend': validate_backend(config.get('bridge_wildcard_backend'))}}}}
         path = directory / 'inventory.json'
         path.write_text(json.dumps(inventory)); path.chmod(0o600)
         await _run_playbook(Path(__file__).resolve().parents[3] / 'infra' / 'ansible' / 'bridge.yml', path)

@@ -26,6 +26,7 @@ from bot.services.infrastructure.bridge import (bridge_entries, change_wildcard_
 from bot.services.infrastructure.provisioning import ansible_bridge
 
 PASSTHROUGH_SNIS = ['dl.google.com', 'fonts.google.com']
+BRIDGE_REMARK = '🇩🇪 Germany 🔗'
 MASK_ROUTE = {'sni': 'dl.google.com', 'backend': '127.0.0.1:8443'}
 
 
@@ -100,9 +101,9 @@ BRIDGE_CONFIG = {'bridge_address': 'bridge.example.net', 'bridge_ssh_port': 22,
                  'bridge_ssh_user': 'root', 'bridge_host_public_key': 'ssh-ed25519 BRIDGEKEY',
                  'bridge_extra_routes': [], 'bridge_wildcard_backend': '127.0.0.1:8443'}
 
-NODE = dict(id=1, panel_uuid='node', name='node1 (DE)', host_uuid='direct')
+NODE = dict(id=1, panel_uuid='node', name='node1 (DE)', host_uuid='direct', country='DE')
 CLIENT_NODE = SimpleNamespace(id=1, panel_uuid='node', name='node1 (DE)', host_uuid='direct')
-BRIDGE_INFRA = SimpleNamespace(id=9, panel_uuid='bridge-node', name='node9 (RU)', host_uuid=None)
+BRIDGE_INFRA = SimpleNamespace(id=9, panel_uuid='bridge-node', name='node9 (RU)', host_uuid=None, country='RU')
 
 WILDCARD_BINDING = {'configProfileUuid': 'profile', 'configProfileInboundUuid': 'in-wildcard'}
 
@@ -212,7 +213,7 @@ class BridgeCreationTests(BridgeFlowBase):
         self.assertEqual(bridge['sni'], 'cdn.google.com')
         self.assertEqual(bridge['nodes'], ['node'])
         self.assertEqual(bridge['inbound'], WILDCARD_BINDING)
-        self.assertEqual(bridge['remark'], 'node1 (DE) bridge')
+        self.assertEqual(bridge['remark'], '🇩🇪 Germany 🔗')
         state = self.registered()
         self.assertEqual(state['sni'], 'cdn.google.com')
         self.assertTrue(state['sni_added'])
@@ -260,7 +261,7 @@ class BridgeCreationTests(BridgeFlowBase):
 
     async def test_second_bridge_with_different_sni_is_refused(self):
         self.api.hosts.append({'uuid': 'other-bridge', 'address': 'bridge.example.net',
-            'sni': 'fonts.google.com', 'nodes': ['node'], 'remark': 'node1 (DE) bridge'})
+            'sni': 'fonts.google.com', 'nodes': ['node'], 'remark': BRIDGE_REMARK})
         with self.assertRaisesRegex(ValueError, 'уже есть мост'):
             await self.run_bridge(sni='cdn.google.com')
         self.assertEqual(self.ansible_calls, [])
@@ -334,7 +335,7 @@ class BridgeCreationTests(BridgeFlowBase):
         # must still render the route, otherwise haproxy cuts the SNI off
         # while the panel reports a successful bridge.
         self.api.hosts.append({'uuid': 'bridge-host', 'address': 'bridge.example.net',
-            'sni': 'cdn.google.com', 'remark': 'node1 (DE) bridge', 'nodes': ['node'],
+            'sni': 'cdn.google.com', 'remark': BRIDGE_REMARK, 'nodes': ['node'],
             'inbound': dict(WILDCARD_BINDING)})
         await self.run_bridge()
         self.assertEqual(self.ansible_calls[-1],
@@ -347,14 +348,14 @@ class BridgeCreationTests(BridgeFlowBase):
             'sni': 'fonts.google.com', 'nodes': ['other-node']})
         with self.assertRaisesRegex(ValueError, 'уже используется'):
             await create_bridge_host(self.api, as_node(), 'bridge.example.net',
-                'fonts.google.com', WILDCARD_BINDING)
+                'fonts.google.com', WILDCARD_BINDING, BRIDGE_REMARK)
         # A previously created matching host is reused instead of duplicated.
         self.api.hosts = [host for host in self.api.hosts if host['uuid'] != 'foreign']
         self.api.hosts.append({'uuid': 'own-bridge', 'address': 'bridge.example.net',
-            'sni': 'fonts.google.com', 'remark': 'node1 (DE) bridge', 'nodes': ['node'],
+            'sni': 'fonts.google.com', 'remark': BRIDGE_REMARK, 'nodes': ['node'],
             'inbound': dict(WILDCARD_BINDING)})
         reused, created = await create_bridge_host(self.api, as_node(), 'bridge.example.net',
-            'fonts.google.com', WILDCARD_BINDING)
+            'fonts.google.com', WILDCARD_BINDING, BRIDGE_REMARK)
         self.assertEqual(reused, 'own-bridge')
         self.assertFalse(created)
 
@@ -561,6 +562,7 @@ class BridgeInventoryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(host['ansible_user'], 'root')
             self.assertEqual(host['ansible_ssh_private_key_file'], '/tmp/automation_key')
             self.assertEqual(host['bridge_routes'], routes)
+            self.assertEqual(host['bridge_wildcard_backend'], '127.0.0.1:8443')
             self.assertIn('bridge.example.net ssh-ed25519 BRIDGEKEY', captured['known_hosts'])
             self.assertTrue(captured['playbook'].endswith('infra/ansible/bridge.yml'))
 
@@ -801,26 +803,30 @@ class BridgePlaybookTests(unittest.TestCase):
         ]
         content = self.rendered_template()
         rendered = Environment(undefined=StrictUndefined).from_string(content).render(
-            bridge_routes=routes, bridge_backends=[routes[0]['backend'], routes[1]['backend']])
+            bridge_routes=routes, bridge_backends=[routes[0]['backend'], routes[1]['backend']],
+            bridge_wildcard_backend='127.0.0.1:8443')
         self.assertIn('acl sni_1 req.ssl_sni -i dl.google.com', rendered)
         self.assertIn('use_backend 127_0_0_1_8443 if sni_1', rendered)
         self.assertIn('acl sni_2 req.ssl_sni -i cdn.google.com', rendered)
         self.assertIn('use_backend 2001_db8__1_443 if sni_2', rendered)
         self.assertIn('backend 127_0_0_1_8443\n    mode tcp\n    server target 127.0.0.1:8443', rendered)
         self.assertIn('server target [2001:db8::1]:443', rendered)
-        self.assertIn('default_backend reject', rendered)
-        self.assertIn('backend reject', rendered)
+        # Unknown SNIs fall through to the wildcard, never an SNI-based reject.
+        self.assertIn('default_backend 127_0_0_1_8443', rendered)
+        self.assertNotIn('reject', rendered)
         self.assertNotIn('{%', rendered)
         self.assertNotIn('{{', rendered)
 
-    def test_rendered_configuration_rejects_without_routes(self):
+    def test_rendered_configuration_falls_through_to_the_wildcard(self):
         from jinja2 import Environment, StrictUndefined
         content = self.rendered_template()
         rendered = Environment(undefined=StrictUndefined).from_string(content).render(
-            bridge_routes=[], bridge_backends=[])
-        self.assertIn('default_backend reject', rendered)
+            bridge_routes=[], bridge_backends=['127.0.0.1:8443'],
+            bridge_wildcard_backend='127.0.0.1:8443')
+        self.assertIn('default_backend 127_0_0_1_8443', rendered)
+        self.assertIn('server target 127.0.0.1:8443', rendered)
         self.assertNotIn('use_backend', rendered)
-        self.assertNotIn('server target', rendered.replace('backend reject', ''))
+        self.assertNotIn('reject', rendered)
 
 
 class BridgeLabelTests(unittest.TestCase):

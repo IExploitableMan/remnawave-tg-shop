@@ -16,6 +16,12 @@
       loop: "{{ bridge_routes }}"
       when: item.backend not in (bridge_backends | default([]))
 
+    - name: Include the default backend
+      # Unmatched SNIs fall through to the local wildcard so REALITY masks
+      # them by proxying to the real site — rejecting by SNI is a fingerprint.
+      ansible.builtin.set_fact:
+        bridge_backends: "{{ bridge_backends | union([bridge_wildcard_backend]) }}"
+
     - name: Render the haproxy configuration
       ansible.builtin.copy:
         dest: "{{ bridge_config }}"
@@ -40,15 +46,12 @@
               tcp-request content accept if { req_ssl_hello_type 1 }
           {% for route in bridge_routes %}    acl sni_{{ loop.index }} req.ssl_sni -i {{ route.sni }}
               use_backend {{ route.backend | replace('[', '') | replace(']', '') | replace(':', '_') | replace('.', '_') }} if sni_{{ loop.index }}
-          {% endfor %}    default_backend reject
+          {% endfor %}    default_backend {{ bridge_wildcard_backend | replace('[', '') | replace(']', '') | replace(':', '_') | replace('.', '_') }}
 
           {% for backend in bridge_backends %}backend {{ backend | replace('[', '') | replace(']', '') | replace(':', '_') | replace('.', '_') }}
               mode tcp
               server target {{ backend }}
-
-          {% endfor %}backend reject
-              mode tcp
-              tcp-request content reject
+          {% endfor %}
       register: bridge_rendered
 
     - name: Check the compose stack files

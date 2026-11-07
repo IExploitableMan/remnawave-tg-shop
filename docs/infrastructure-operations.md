@@ -332,8 +332,9 @@ extra routes live in the infrastructure settings (bridge_extra_routes),
 every registered bridge contributes one route to the bridged node's
 address:443, and the wildcard's own REALITY mask domain (its target) is
 routed to the local wildcard backend (bridge_wildcard_backend, by default
-127.0.0.1:8443) automatically so the certificate SNI reaches REALITY instead
-of the reject. Unmatched SNIs are rejected. Each apply renders /opt/remnanode/haproxy.cfg from that table —
+127.0.0.1:8443) automatically. Unmatched SNIs fall through to the same local
+wildcard so REALITY masks them by proxying to the real site — an SNI-based
+reject would fingerprint the fronting. Each apply renders /opt/remnanode/haproxy.cfg from that table —
 one ACL and use_backend per route, one backend per unique backend address,
 and a fail-closed default — then validates it with `haproxy -c` inside the
 compose service image before restarting. The only server-side requirement is

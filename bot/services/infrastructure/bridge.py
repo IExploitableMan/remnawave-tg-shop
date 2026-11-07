@@ -3,7 +3,9 @@
 haproxy owns port 443 on the bridge server and routes by SNI: every bridge
 forwards its SNI to the bridged node's address, extra routes point at their
 configured backends, the wildcard's mask domain is routed to the local
-wildcard backend automatically, and unmatched SNIs are rejected — the server
+wildcard backend automatically, and unmatched SNIs fall through to the local
+wildcard as well — REALITY masks them by proxying to the real site, which an
+SNI-based reject would fingerprint — the server
 holds no routing state of its own.
 
 A bridge host points at the bridge address bound to the VLESS-WILDCARD
@@ -34,8 +36,10 @@ from .settings import validate_hostname, validate_route, validate_backend
 WILDCARD_TAG = 'VLESS-WILDCARD'
 
 
-def bridge_host_remark(node_name):
-    return f'{node_name} bridge'
+def bridge_host_remark(country_code):
+    """Bridge hosts keep the node's host name with a link marker: 🇳🇱 Netherlands 🔗."""
+    from .host_names import country_host_base
+    return f'{country_host_base(country_code)} 🔗'
 
 
 def _host_nodes(host):
@@ -190,10 +194,9 @@ async def _gemini_enabled(service, node, host_uuids):
     return False
 
 
-async def create_bridge_host(api, node, bridge_address, sni, binding):
+async def create_bridge_host(api, node, bridge_address, sni, binding, remark):
     """Create the panel host pointing at the bridge; returns (uuid, created)."""
     hosts = await api.call('GET', '/hosts') or []
-    remark = bridge_host_remark(node.name)
     # One SNI is a single haproxy route: it must not be claimed by any other host.
     existing = next((host for host in hosts if host.get('sni') == sni
         and host.get('remark') == remark and host.get('address') == bridge_address
@@ -243,10 +246,10 @@ def _backend_address(address):
 
 
 async def _wildcard_mask_sni(service, config):
-    """The wildcard's REALITY mask domain (its target/dest): haproxy must
-    route it to the wildcard backend so the certificate SNI actually reaches
-    REALITY instead of the fail-closed reject. Best-effort — absent or
-    unreadable target simply adds no route."""
+    """The wildcard's REALITY mask domain (its target/dest): haproxy routes it
+    to the wildcard backend explicitly so the certificate SNI always reaches
+    REALITY even if the default changes. Best-effort — absent or unreadable
+    target simply adds no route."""
     try:
         node = await _bridge_infra_node(service, config)
         if node is None or not node.panel_uuid:
@@ -279,7 +282,9 @@ async def desired_routes(service, config, exclude_node_id=None):
     """Every SNI route haproxy must serve: operator extras, one
     route per registered bridge (SNI → the bridged node's address:443 — the
     node terminates REALITY itself), and the wildcard's own mask domain routed
-    to the local wildcard backend automatically. Unmatched SNIs are rejected."""
+    to the local wildcard backend automatically. Unmatched SNIs fall through
+    to the local wildcard, where REALITY masks them by proxying to the real
+    site instead of fingerprinting an SNI-based reject."""
     from db.dal import app_settings_dal
     backend = validate_backend(config.get('bridge_wildcard_backend'))
     routes = []
@@ -359,6 +364,7 @@ async def create_bridge(service, node, deployment, config, job_id, sni):
     route_in_table = any(route['sni'] == sni for route in routes)
     if not route_existed and route_in_table:
         raise ValueError(f'SNI {sni} уже используется другим маршрутом моста')
+    remark = bridge_host_remark(node.country)
 
     # The wildcard accepts the SNI and the node serves it before haproxy
     # starts forwarding the SNI to the node.
@@ -388,7 +394,7 @@ async def create_bridge(service, node, deployment, config, job_id, sni):
             routes.append({'sni': sni, 'backend': _backend_address(deployment.address)})
         await ansible_bridge(service, config, routes)
         await stage(service, job_id, 'bridge_host')
-        host_uuid, host_created = await create_bridge_host(api, node, config['bridge_address'], sni, binding)
+        host_uuid, host_created = await create_bridge_host(api, node, config['bridge_address'], sni, binding, remark)
         hosts = await api.call('GET', '/hosts') or []
         verified = next((host for host in hosts if host.get('uuid') == host_uuid
             and host.get('sni') == sni and not host.get('isDisabled')
